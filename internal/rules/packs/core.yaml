@@ -1,0 +1,500 @@
+meta:
+  name: core
+  version: "1.0.0"
+  description: >
+    Generic WordPress/PHP intrusion detection. Contains no client-, host- or
+    incident-specific indicators; those belong in an incident pack layered on
+    top. Regexes are RE2 (Go) — no backreferences or lookaround. PHP quote
+    characters are written [\x27"] to stay clear of YAML quoting rules.
+
+# Directories that are pure noise. Deliberately conservative: `vendor/` is NOT
+# excluded, because composer vendor trees are a favourite shell-hiding spot and
+# the heuristic engine is precise enough to scan them without drowning in noise.
+exclude_paths:
+  - '/node_modules/'
+  - '/\.git/'
+  - '/\.svn/'
+
+rules:
+  # ---------------------------------------------------------------------
+  # Direct code execution from request input. These are structural: no
+  # legitimate plugin calls a function named by a superglobal.
+  # ---------------------------------------------------------------------
+  - id: shell.superglobal_call
+    class: SHELL
+    severity: critical
+    confidence: confirmed
+    actionable: true
+    title: Function call dispatched through a request superglobal
+    detail: >
+      Code calls whatever function name arrives in the request
+      ($_GET[x](...)). This is the canonical dynamic-dispatch web shell and has
+      no legitimate use.
+    remediation: Quarantine the file and hunt for how it was written (upload handler, compromised admin, vulnerable plugin).
+    gate: ['$_']
+    ext: [php, phtml, php3, php4, php5, php7, php8, inc, phar, pht, module]
+    scope: code
+    any:
+      - '\$_(GET|POST|REQUEST|COOKIE|SERVER|FILES)\s*\[[^\]]{0,80}\]\s*\('
+
+  - id: shell.eval_request_var
+    class: SHELL
+    severity: critical
+    confidence: confirmed
+    actionable: true
+    title: eval() of a request-controlled variable
+    detail: The eval($_REQUEST[$key]) backdoor family — a password-gated remote code executor.
+    remediation: Quarantine. Treat the host as fully compromised; this grants arbitrary RCE.
+    gate: ['eval', '_request']
+    ext: [php, phtml, php3, php4, php5, php7, php8, inc, phar, pht]
+    scope: code
+    all:
+      - '\$_REQUEST\s*\[\s*\$[a-zA-Z_]'
+      - 'eval\s*\('
+    within: 400
+
+  - id: shell.eval_superglobal_direct
+    class: SHELL
+    severity: critical
+    confidence: confirmed
+    actionable: true
+    title: eval() applied directly to request input
+    gate: ['eval']
+    ext: [php, phtml, php3, php4, php5, php7, php8, inc, phar, pht]
+    scope: code
+    any:
+      - 'eval\s*\(\s*(stripslashes\s*\(\s*)?\$_(REQUEST|POST|GET|COOKIE)'
+    remediation: Quarantine immediately — unauthenticated RCE.
+
+  - id: shell.eval_obfuscated
+    class: SHELL
+    severity: critical
+    confidence: confirmed
+    actionable: true
+    title: eval() wrapped around a decoder
+    detail: eval(base64_decode(...)) and friends — executable code hidden from plain-text inspection.
+    gate: ['eval']
+    ext: [php, phtml, php3, php4, php5, php7, php8, inc, phar, pht]
+    scope: code
+    any:
+      - 'eval\s*\(\s*(base64_decode|gzinflate|gzuncompress|gzdecode|str_rot13|strrev|hex2bin|convert_uudecode|rawurldecode|urldecode|pack|bin2hex)\s*\('
+      - 'eval\s*\(\s*\$[a-zA-Z_]\w*\s*\(\s*(base64_decode|gzinflate|str_rot13)'
+    remediation: Quarantine. Decode the payload offline for attribution before disposal.
+
+  - id: shell.assert_input
+    class: SHELL
+    severity: critical
+    confidence: confirmed
+    actionable: true
+    title: assert() used as an eval substitute
+    detail: Pre-PHP8 assert() executes string arguments, so it is a common eval-blocklist bypass.
+    gate: ['assert']
+    ext: [php, phtml, php3, php4, php5, php7, php8, inc, phar, pht]
+    scope: code
+    any:
+      - 'assert\s*\(\s*(stripslashes\s*\(\s*)?\$_(REQUEST|POST|GET|COOKIE)'
+      - 'assert\s*\(\s*(base64_decode|gzinflate|str_rot13|hex2bin)\s*\('
+
+  - id: shell.preg_replace_e
+    class: SHELL
+    severity: critical
+    confidence: likely
+    title: preg_replace() with the /e modifier
+    detail: The /e modifier evaluates the replacement as PHP. Removed in PHP 7, so presence implies either legacy code or a deliberate backdoor.
+    gate: ['preg_replace']
+    ext: [php, phtml, php3, php4, php5, inc]
+    any:
+      - 'preg_replace\s*\(\s*[\x27"][^\x27"]{0,200}/[a-zA-Z]{0,6}e[a-zA-Z]{0,6}[\x27"]\s*,'
+    remediation: Inspect by hand; if the replacement string is request-derived this is RCE.
+
+  - id: shell.globals_indirection
+    class: SHELL
+    severity: critical
+    confidence: likely
+    title: Function dispatched via $GLOBALS indirection
+    detail: Calling a function name stored in $GLOBALS defeats simple grep-based scanners.
+    gate: ['$globals']
+    ext: [php, phtml, php5, php7, php8, inc]
+    scope: code
+    any:
+      - '\$GLOBALS\s*\[[^\]]{1,40}\]\s*\('
+
+  - id: shell.variable_variable_call
+    class: SHELL
+    severity: high
+    confidence: likely
+    title: Call through a variable-variable
+    gate: ['$$']
+    ext: [php, phtml, php5, php7, php8, inc]
+    scope: code
+    any:
+      - '\$\$[a-zA-Z_]\w*\s*\('
+      - '\$\{\s*\$[a-zA-Z_]\w*\s*\}\s*\('
+
+  - id: shell.php_input_exec
+    class: SHELL
+    severity: critical
+    confidence: confirmed
+    actionable: true
+    title: Raw request body passed to an executor
+    detail: >
+      Reading php://input is normal for REST handlers; combining it with
+      eval/assert/create_function in the same file is not.
+    gate: ['php://input']
+    ext: [php, phtml, php5, php7, php8, inc]
+    # php://input is necessarily a string literal, so it is matched raw; the
+    # executor must be real code. Without that split this fired on Wordfence's
+    # own translation strings ("Disable reading of php://input") and on
+    # docblocks describing the technique.
+    #
+    # preg_replace is deliberately NOT an executor here: /e was removed in
+    # PHP 7 and the surviving legacy case has its own rule
+    # (shell.preg_replace_e). Listing it bare made every large plugin match.
+    all:
+      - 'php://input'
+    all_code:
+      - '(eval|assert|create_function)\s*\('
+    within: 2000
+
+  - id: shell.create_function
+    class: SHELL
+    severity: high
+    confidence: likely
+    title: create_function() present
+    detail: Removed in PHP 8 and an eval equivalent; overwhelmingly malware in modern code.
+    gate: ['create_function']
+    ext: [php, phtml, php5, php7, inc]
+    scope: code
+    any:
+      - 'create_function\s*\('
+
+  # ---------------------------------------------------------------------
+  # Obfuscation markers. These rarely stand alone but corroborate heuristics.
+  # ---------------------------------------------------------------------
+  - id: obf.chr_concat_chain
+    class: SHELL
+    severity: high
+    confidence: likely
+    title: Long chr() concatenation chain
+    detail: Building a function name or payload character-by-character to evade literal matching.
+    gate: ['chr(']
+    ext: [php, phtml, php5, php7, php8, inc]
+    scope: code
+    any:
+      - '(chr\s*\(\s*\d{1,3}\s*\)\s*\.\s*){6,}'
+
+  - id: obf.hex_escape_run
+    class: SHELL
+    severity: medium
+    confidence: likely
+    title: Long hex-escape run in source
+    gate: ['\x']
+    ext: [php, phtml, php5, php7, php8, inc]
+    any:
+      - '(\\x[0-9a-fA-F]{2}){12,}'
+
+  # Reading disable_functions and rewriting it are different acts, and they
+  # were reported as one. ini_get is how ordinary code asks whether exec()
+  # exists before offering a feature that needs it — a live estate produced
+  # four medium findings from one premium image-optimisation plugin doing
+  # exactly that. ini_set and ini_restore are another matter: the directive is
+  # PHP_INI_SYSTEM, so the call cannot succeed, and no legitimate plugin has
+  # reason to attempt it. Only one of the two deserves attention.
+  - id: obf.disable_functions_probe
+    class: SHELL
+    severity: low
+    confidence: review
+    title: Code reads disable_functions
+    detail: >-
+      Shells check which exec primitives a host has disabled before choosing one, but so does
+      ordinary code deciding whether a feature is available. Weak alone; it counts as
+      corroboration when the heuristic engine sees it beside a decoder and an executor.
+    gate: ['disable_functions']
+    ext: [php, phtml, php5, php7, php8, inc]
+    any:
+      - 'ini_get\s*\(\s*[\x27"]disable_functions'
+
+  - id: obf.disable_functions_tamper
+    class: SHELL
+    severity: high
+    confidence: likely
+    title: Code attempts to rewrite disable_functions
+    detail: >-
+      disable_functions is PHP_INI_SYSTEM, so ini_set and ini_restore cannot change it from a
+      script. Code that tries is attempting to re-enable an exec primitive the administrator
+      disabled deliberately, which no legitimate plugin has reason to do.
+    remediation: Read the surrounding function. Treat as a bypass attempt until proven otherwise.
+    gate: ['disable_functions']
+    ext: [php, phtml, php5, php7, php8, inc]
+    any:
+      - 'ini_(set|restore)\s*\(\s*[\x27"]disable_functions'
+
+  - id: shell.sig_wso
+    class: SHELL
+    severity: critical
+    confidence: confirmed
+    actionable: true
+    title: WSO web shell signature
+    detail: Version dot is required — bare "WSO 0"/"WSO 1" matches random JPEG bytes.
+    gate: ['wso']
+    any: ['WSO\s?[0-9]\.[0-9]']
+
+  - id: shell.sig_filesman
+    class: SHELL
+    severity: critical
+    confidence: confirmed
+    actionable: true
+    title: FilesMan file-manager shell signature
+    gate: ['filesman']
+    any: ['FilesMan']
+
+  - id: shell.sig_b374k
+    class: SHELL
+    severity: critical
+    confidence: confirmed
+    actionable: true
+    title: b374k shell signature
+    gate: ['b374k']
+    any: ['b374k']
+
+  - id: shell.sig_indoxploit
+    class: SHELL
+    severity: critical
+    confidence: confirmed
+    actionable: true
+    title: IndoXploit shell signature
+    gate: ['indoxploit']
+    any: ['(?i)indoxploit']
+
+  - id: shell.sig_generic_banner
+    class: SHELL
+    severity: critical
+    confidence: confirmed
+    actionable: true
+    title: Self-identifying web shell banner
+    gate: ['shell by']
+    any: ['(?i)(web ?shell by|shell by [a-z0-9_-]{2,})']
+
+  - id: shell.sig_legacy_family
+    class: SHELL
+    severity: critical
+    confidence: confirmed
+    actionable: true
+    title: Legacy shell family signature (c99/r57/priv8)
+    any: ['(?i)(c99shell|r57shell|priv8 ?shell|Marijuana Shell|alfa ?team ?shell)']
+
+  # ---------------------------------------------------------------------
+  # Handler-configuration abuse. Wordfence scans file CONTENT and misses these
+  # entirely — they make otherwise-inert files execute as PHP.
+  # ---------------------------------------------------------------------
+  - id: wp.htaccess_php_handler
+    class: WP
+    severity: critical
+    confidence: likely
+    title: .htaccess remaps a non-PHP extension to the PHP handler
+    detail: >
+      Makes files such as .jpg or .txt execute as PHP, so a "harmless" upload
+      becomes a live shell. A content scanner never sees this.
+    remediation: Compare against the canonical WordPress .htaccess; remove attacker directives.
+    path_any: ['(^|/)\.htaccess$']
+    any:
+      - '(?i)AddType\s+application/x-httpd-php'
+      - '(?i)AddHandler\s+[^\n]*php'
+      - '(?i)SetHandler\s+application/x-httpd-php'
+      - '(?i)php_value\s+auto_prepend_file'
+      - '(?i)php_flag\s+engine\s+on'
+
+  - id: wp.htaccess_uploads_exec
+    class: WP
+    severity: critical
+    confidence: likely
+    title: .htaccess inside uploads enables PHP execution
+    path_any: ['wp-content/uploads/.*\.htaccess$']
+    any:
+      - '(?i)(php_flag\s+engine\s+on|AddHandler|AddType|SetHandler|<Files)'
+    remediation: The uploads tree must never execute PHP. Remove the file and add an explicit deny.
+
+  - id: wp.user_ini_prepend
+    class: WP
+    severity: critical
+    confidence: likely
+    title: .user.ini injects a file into every PHP request
+    detail: auto_prepend_file loads attacker code ahead of WordPress itself, before any security plugin initialises.
+    path_any: ['(^|/)\.?user\.ini$']
+    any:
+      - '(?i)auto_(prepend|append)_file'
+    remediation: Remove the directive and quarantine the referenced file.
+
+  # ---------------------------------------------------------------------
+  # WordPress-aware persistence.
+  # ---------------------------------------------------------------------
+  - id: persist.auth_cookie_bypass
+    class: WP
+    severity: critical
+    confidence: likely
+    title: Authentication cookie minted from request input
+    detail: wp_set_auth_cookie() reachable from a request parameter is a silent admin-login backdoor that leaves no rogue user behind.
+    gate: ['wp_set_auth_cookie']
+    ext: [php, inc]
+    scope: code
+    # The identity being authenticated must itself come from the request.
+    #
+    # Co-occurrence within 600 bytes was far too loose: resolving a user id
+    # and then calling wp_set_auth_cookie is what every login, membership and
+    # SSO plugin does, and a $_POST redirect parameter in the same function
+    # proves nothing. A field estate reported ProfilePress's own auto-login on
+    # that basis. Requiring the superglobal inside the call's own statement is
+    # the difference between a plugin doing its job and a backdoor.
+    all_code:
+      - 'wp_set_auth_cookie\s*\(\s*[^;]{0,80}\$_(GET|POST|REQUEST|COOKIE)'
+    not:
+      - 'current_user_can\s*\(|check_admin_referer\s*\(|wp_verify_nonce\s*\('
+    remediation: Remove the code, then force a global session invalidation (rotate AUTH salts).
+
+  - id: persist.rogue_admin_creator
+    class: WP
+    severity: critical
+    confidence: likely
+    title: Request-triggered administrator creation
+    gate: ['administrator']
+    ext: [php, inc]
+    # All three must cluster. Spread across a whole file this matched any
+    # plugin with a legitimate user-import or support-account feature, because
+    # some unrelated $_POST hundreds of lines away satisfied the third term.
+    scope: code
+    all:
+      - 'wp_(create|insert)_user\s*\('
+      - '(administrator|add_role|set_role)'
+      - '\$_(GET|POST|REQUEST|COOKIE)'
+    within: 600
+    # A capability check or nonce verification in the same neighbourhood means
+    # this is an admin feature, not a backdoor. Attackers do not gate their own
+    # persistence behind the permission system they are trying to defeat.
+    not:
+      - 'current_user_can\s*\(|check_admin_referer\s*\(|wp_verify_nonce\s*\('
+    remediation: Remove the code and audit the administrator list for accounts it already created.
+
+  - id: persist.remote_payload_fetch
+    class: SHELL
+    severity: high
+    confidence: review
+    title: Remote content fetched and executed
+    gate: ['http']
+    ext: [php, inc]
+    # The URL is a string literal so it is matched raw; the executor must be
+    # real code, and the two must be near each other. A plugin that fetches a
+    # remote feed in one file and happens to call eval() 40KB away is an
+    # updater, not a dropper.
+    all:
+      - '(file_get_contents|curl_exec|fopen|fsockopen)\s*\(\s*[\x27"]?https?://'
+    all_code:
+      - '(eval|assert|create_function)\s*\('
+    within: 1500
+    remediation: Verify the destination; legitimate updaters fetch but do not eval.
+
+  - id: spam.mail_relay
+    class: SHELL
+    severity: high
+    confidence: likely
+    title: Mail sent directly from request input
+    detail: Classic spam-relay shell — turns the site into a mail cannon and gets the IP blacklisted.
+    gate: ['mail(']
+    ext: [php, inc]
+    scope: code
+    any:
+      - '\bmail\s*\(\s*\$_(POST|GET|REQUEST)'
+
+  # ---------------------------------------------------------------------
+  # Placement-based rules. Location alone is strong evidence in WordPress,
+  # whose directory layout is fixed and well known.
+  # ---------------------------------------------------------------------
+  - id: place.php_in_uploads
+    class: WP
+    severity: critical
+    confidence: likely
+    title: PHP file inside the uploads tree
+    detail: >
+      Stock WordPress never places executable PHP under uploads/ beyond the
+      "Silence is golden" index stubs. Anything else is either a shell or a
+      badly behaved plugin.
+    path_any: ['wp-content/uploads/']
+    ext: [php, phtml, php3, php4, php5, php7, php8, phar, pht, phps]
+    not:
+      - 'Silence is golden'
+    remediation: Quarantine, then deny PHP execution under uploads at the web-server level.
+
+  - id: place.php_in_asset_dir
+    class: WP
+    severity: critical
+    confidence: confirmed
+    actionable: true
+    title: PHP with exec/obfuscation code hidden in an asset directory
+    detail: Shells are routinely dropped into css/, js/, images/ and fonts/ where reviewers do not look.
+    path_any: ['/(css|js|images|img|fonts|assets|icons|media)/']
+    path_not: ['\.asset\.php$', '/node_modules/', '/dup-installer/']
+    ext: [php, phtml, php5, php7, php8]
+    not:
+      - 'Silence is golden'
+    any:
+      - '(shell_exec|passthru|proc_open|popen|\bsystem\s*\(|\beval\s*\(|assert\s*\(|create_function|move_uploaded_file|gzinflate|str_rot13|base64_decode)'
+
+  - id: place.upload_handler_in_asset_dir
+    class: WP
+    severity: high
+    confidence: likely
+    title: File-upload handler in an asset directory
+    path_any: ['/(css|js|images|img|fonts|assets)/']
+    ext: [php, phtml, php5]
+    all:
+      - 'move_uploaded_file\s*\('
+      - '\$_FILES'
+
+  # ---------------------------------------------------------------------
+  # JavaScript-side compromise.
+  # ---------------------------------------------------------------------
+  - id: js.cryptominer
+    class: JS
+    severity: high
+    confidence: likely
+    title: In-browser cryptominer loader
+    ext: [js]
+    path_not: ['/node_modules/', '/cache/']
+    any:
+      - '(?i)(coinhive|cryptonight|coin-?imp|webminepool|deepminer|crypto-loot|jsecoin|minero\.cc|webmine\.pro)'
+    remediation: Restore the file from the official plugin/theme package.
+
+  - id: js.obfuscated_loader
+    class: JS
+    severity: medium
+    confidence: review
+    title: Obfuscated JavaScript loader
+    detail: Minified vendor bundles (pdf.js, packed Vue builds) can match these; confirm against the official package before acting.
+    ext: [js]
+    path_not: ['/node_modules/', '/cache/', '\.min\.js$']
+    any:
+      - 'eval\s*\(\s*atob\s*\('
+      - 'eval\s*\(\s*function\s*\(\s*p\s*,\s*a\s*,\s*c\s*,\s*k\s*,\s*e\s*,\s*[dr]\s*\)'
+      - 'atob\s*\(\s*[\x27"][A-Za-z0-9+/]{200,}'
+
+  - id: js.card_skimmer
+    class: JS
+    severity: critical
+    confidence: likely
+    title: Payment-card data read and transmitted
+    detail: Magecart-style skimmer — reads card fields then beacons them off-site.
+    ext: [js]
+    path_not: ['/node_modules/']
+    all:
+      - '(?i)(cardnumber|card_number|cc_num|cvv|cvc|creditcard)'
+      - '(?i)(navigator\.sendBeacon|new Image\s*\(|fetch\s*\(|XMLHttpRequest)'
+    remediation: Treat as a payment-data breach; preserve evidence before removal and follow card-brand notification duties.
+
+  - id: js.suspicious_tld_beacon
+    class: JS
+    severity: medium
+    confidence: review
+    title: Hardcoded link to a high-abuse TLD in local JavaScript
+    ext: [js]
+    path_not: ['/node_modules/', '/cache/']
+    any:
+      - 'https?://[a-z0-9.-]+\.(top|xyz|cyou|icu|club|shop|online|monster|surf|quest)/[a-z0-9]'

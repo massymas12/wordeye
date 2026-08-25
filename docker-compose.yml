@@ -1,0 +1,98 @@
+# WordEye console.
+#
+#   docker compose run --rm certgen     # once: self-signed cert for this host
+#   docker compose up -d
+#   docker compose logs wordeye         # the first-run admin password
+#
+# See deploy/README.md for the Azure walkthrough.
+
+services:
+  wordeye:
+    build:
+      context: .
+      args:
+        VERSION: ${WORDEYE_VERSION:-0.1.8}
+    image: wordeye:${WORDEYE_VERSION:-0.1.8}
+    container_name: wordeye
+    restart: unless-stopped
+
+    ports:
+      # Operator console — bound to LOOPBACK ON THE HOST deliberately.
+      #
+      # This interface can order containment across every site in the estate,
+      # so it must not face the internet. Reach it with an SSH tunnel:
+      #     ssh -L 8443:127.0.0.1:8443 azureuser@<vm>
+      # then open https://127.0.0.1:8443
+      #
+      # Changing this to 0.0.0.0 publishes the containment API to the world.
+      - "127.0.0.1:8443:8443"
+
+      # Agent ingest — public by necessity. Client hosts connect outbound to
+      # it; nothing ever connects inbound to an agent. Serves TLS, and agents
+      # from generated installers pin the certificate.
+      - "8444:8444"
+
+    command:
+      - serve
+      - --db=/data/wordeye.db
+      - --console=0.0.0.0:8443
+      - --ingest=0.0.0.0:8444
+      - --tls-cert=/certs/cert.pem
+      - --tls-key=/certs/key.pem
+      - --agent-binaries=/agents
+      # Stamped into every generated installer, so it must be how client hosts
+      # will actually reach this machine, and must appear in the certificate.
+      # Fail at `up` rather than serving a console that cannot issue installers.
+      - --public-url=${WORDEYE_PUBLIC_URL:?set WORDEYE_PUBLIC_URL, e.g. https://console.example.com:8444}
+
+    volumes:
+      - wordeye-data:/data
+      - wordeye-certs:/certs
+
+    # The root filesystem is read-only, so give SQLite somewhere for its
+    # temporary files. Everything durable lives on the two volumes above.
+    tmpfs:
+      - /tmp:size=64m
+
+    healthcheck:
+      # The ingest listener answers /v1/ping unauthenticated. Checking it
+      # verifies the part agents depend on, rather than merely that a process
+      # exists. The image has no shell or curl, so the console binary probes
+      # itself.
+      test: ["CMD", "/usr/local/bin/wordeye", "healthcheck", "--url", "https://127.0.0.1:8444/v1/ping", "--ca", "/certs/cert.pem"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+    # Least privilege: the console writes to two volumes and needs nothing else.
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+
+  # One-shot certificate generation. Not part of `up`.
+  #
+  #   docker compose run --rm certgen
+  #
+  # A self-signed certificate is the right default here rather than a
+  # compromise: generated installers embed and PIN it, so agents verify this
+  # exact console instead of trusting every public CA. Swap in a real
+  # certificate if you also want browsers to be satisfied.
+  certgen:
+    build:
+      context: .
+      args:
+        VERSION: ${WORDEYE_VERSION:-0.1.8}
+    image: wordeye:${WORDEYE_VERSION:-0.1.8}
+    profiles: ["tools"]
+    entrypoint: ["/usr/local/bin/wordeye", "gencert"]
+    command:
+      - --hosts=${WORDEYE_HOSTS:?set WORDEYE_HOSTS to the names/IPs agents will use, e.g. console.example.com,20.1.2.3}
+      - --out=/certs
+    volumes:
+      - wordeye-certs:/certs
+
+volumes:
+  wordeye-data:
+  wordeye-certs:

@@ -1,0 +1,30 @@
+dist/
+reports/
+*.exe
+*.ndjson
+
+# Engagement material never leaves the working tree.
+#
+# Incident packs and the scripts they were ported from carry client-specific
+# indicators — attacker domains, filenames and tokens observed on a customer's
+# estate — and the pack is named for the engagement itself. That is the client's
+# data, not the product's, and publishing it would identify the engagement.
+#
+# The rule packs are embedded with a glob (packs/*.yaml), so an absent incident
+# pack changes nothing about the build.
+ember_scan.sh
+*ember*
+*Ember*
+*emerald*
+*Emerald*
+internal/rules/packs/ember.yaml
+
+# Local operator state that must never be committed.
+.env
+.env.*
+*.pem
+*.key
+*.db
+*.db-wal
+*.db-shm
+wordeye-*.json

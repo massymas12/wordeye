@@ -1,0 +1,29 @@
+# Keep the build context small and, more importantly, keep secrets and local
+# state out of the image. Anything listed here is invisible to `docker build`.
+
+.git
+.gitignore
+
+# Built artefacts: the image builds its own from source, and copying a stale
+# host binary in would produce an image whose version does not match its code.
+dist/
+*.exe
+
+# Local console state. wordeye.db holds agent credentials (hashed), findings
+# for real client sites, and the audit log. A cert/key pair here would be the
+# console's identity to every agent in the estate. None of it belongs in a
+# layer that gets pushed to a registry.
+*.db
+*.db-wal
+*.db-shm
+*.pem
+*.key
+certs/
+data/
+
+# Reports from field runs name client sites and their file inventories.
+wordeye-*.json
+*.log
+
+.vscode/
+.idea/

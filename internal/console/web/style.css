@@ -1,0 +1,282 @@
+/* WordEye console.
+   Dark, dense, and legible at a glance: this gets read during incidents, often
+   at 3am, so severity colour and status are the loudest things on the page. */
+
+:root {
+  --bg:        #0d1117;
+  --bg-raise:  #161b22;
+  --bg-hover:  #1c2333;
+  --line:      #2a3040;
+  --fg:        #d6dae3;
+  --fg-dim:    #7d8694;
+  --accent:    #58a6ff;
+
+  --critical:  #ff5c57;
+  --high:      #ff9f43;
+  --medium:    #e3c04a;
+  --low:       #56b6c2;
+  --info:      #7d8694;
+  --ok:        #46c17c;
+
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+.hidden { display: none !important; }
+.dim    { color: var(--fg-dim); }
+.mono   { font-family: var(--mono); }
+.tiny   { font-size: 11px; }
+.err    { color: var(--critical); min-height: 1.2em; margin: .5rem 0 0; }
+.warn   { color: var(--high); }
+
+/* --- sign-in ------------------------------------------------------------ */
+
+.auth {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  padding: 1rem;
+}
+.auth-card {
+  background: var(--bg-raise);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 2rem;
+  width: min(420px, 100%);
+}
+.auth-card h1 { margin: 0 0 1.5rem; font-size: 1.4rem; font-weight: 600; }
+.auth-card label { display: block; margin-bottom: 1rem; color: var(--fg-dim); font-size: 12px; }
+.auth-card input {
+  display: block;
+  width: 100%;
+  margin-top: .35rem;
+  padding: .6rem .7rem;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--fg);
+  font-size: 14px;
+}
+.auth-card input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+#qr { display: block; margin: 0 auto 1rem; border-radius: 6px; background: #fff; padding: 8px; }
+#secret { text-align: center; word-break: break-all; color: var(--fg-dim); }
+#recovery-codes {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 1rem;
+  line-height: 1.9;
+  letter-spacing: .06em;
+}
+
+/* --- chrome ------------------------------------------------------------- */
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 2rem;
+  padding: 0 1.25rem;
+  height: 52px;
+  background: var(--bg-raise);
+  border-bottom: 1px solid var(--line);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+.brand { font-weight: 600; white-space: nowrap; }
+header nav { display: flex; gap: .25rem; flex: 1; flex-wrap: wrap; }
+header nav a {
+  color: var(--fg-dim);
+  text-decoration: none;
+  padding: .4rem .7rem;
+  border-radius: 6px;
+  font-size: 13px;
+}
+header nav a:hover   { background: var(--bg-hover); color: var(--fg); }
+header nav a.active  { background: var(--bg-hover); color: var(--accent); }
+.who { display: flex; align-items: center; gap: .75rem; font-size: 12px; }
+
+button {
+  background: var(--accent);
+  color: #04121f;
+  border: 0;
+  border-radius: 6px;
+  padding: .55rem 1rem;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+button:hover:not(:disabled) { filter: brightness(1.1); }
+button:disabled { opacity: .45; cursor: not-allowed; }
+button.ghost {
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid var(--line);
+  font-weight: 400;
+}
+button.ghost:hover:not(:disabled) { background: var(--bg-hover); }
+button.danger { background: var(--critical); color: #1a0405; }
+button.link {
+  background: none; color: var(--fg-dim);
+  padding: 0; font-weight: 400; text-decoration: underline;
+}
+
+/* --- stat tiles --------------------------------------------------------- */
+
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: .75rem;
+  padding: 1.25rem 1.25rem 0;
+}
+.tile {
+  background: var(--bg-raise);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: .8rem 1rem;
+}
+.tile .n { font-size: 1.7rem; font-weight: 600; font-family: var(--mono); line-height: 1.2; }
+.tile .k { font-size: 11px; color: var(--fg-dim); text-transform: uppercase; letter-spacing: .06em; }
+.tile.crit .n { color: var(--critical); }
+.tile.high .n { color: var(--high); }
+.tile.good .n { color: var(--ok); }
+
+/* --- content ------------------------------------------------------------ */
+
+main { padding: 1.25rem; }
+h2 { font-size: 1.05rem; margin: 0 0 .85rem; font-weight: 600; }
+
+.panel {
+  background: var(--bg-raise);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  margin-bottom: 1.25rem;
+}
+.panel > h2 { padding: .85rem 1rem; margin: 0; border-bottom: 1px solid var(--line); }
+
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th {
+  text-align: left;
+  padding: .55rem 1rem;
+  color: var(--fg-dim);
+  font-weight: 500;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+td { padding: .6rem 1rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+tr:last-child td { border-bottom: 0; }
+tbody tr:hover { background: var(--bg-hover); }
+td.num { font-family: var(--mono); text-align: right; }
+.clickable { cursor: pointer; }
+
+.empty { padding: 2.5rem 1rem; text-align: center; color: var(--fg-dim); }
+
+/* --- badges ------------------------------------------------------------- */
+
+.badge {
+  display: inline-block;
+  padding: .12rem .5rem;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  white-space: nowrap;
+}
+.sev-critical { background: rgba(255,92,87,.16);  color: var(--critical); }
+.sev-high     { background: rgba(255,159,67,.16); color: var(--high); }
+.sev-medium   { background: rgba(227,192,74,.16); color: var(--medium); }
+.sev-low      { background: rgba(86,182,194,.16); color: var(--low); }
+.sev-info     { background: rgba(125,134,148,.16);color: var(--info); }
+
+/* Consensus verdicts. Deliberately not coloured by severity: a "vendor"
+   verdict on a critical-looking file is GOOD news, and colouring it red would
+   train an operator to ignore the one column that carries the conclusion. */
+.vd-campaign     { background: rgba(255,92,87,.16);  color: var(--critical); }
+.vd-singleton    { background: rgba(255,159,67,.16); color: var(--high); }
+.vd-inconclusive { background: rgba(125,134,148,.16);color: var(--info); }
+.vd-vendor       { background: rgba(80,200,120,.16); color: var(--ok); }
+
+/* The rationale line belongs to the row above it, so it carries no top border
+   and no repeated padding. */
+tr.sub td { border-top: 0; padding-top: 0; padding-bottom: .7rem; }
+
+.st-online  { color: var(--ok); }
+.st-stale   { color: var(--high); }
+.st-offline { color: var(--critical); }
+.st-never   { color: var(--fg-dim); }
+.dot { font-size: 9px; vertical-align: middle; margin-right: .3rem; }
+
+/* --- filters + forms ---------------------------------------------------- */
+
+.filters {
+  display: flex;
+  gap: .5rem;
+  flex-wrap: wrap;
+  padding: .75rem 1rem;
+  border-bottom: 1px solid var(--line);
+}
+.filters input, .filters select, .form input, .form select {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--fg);
+  padding: .45rem .6rem;
+  font-size: 13px;
+}
+.filters input { flex: 1; min-width: 180px; }
+.form { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; padding: 1rem; }
+.form label { display: flex; flex-direction: column; gap: .3rem; font-size: 11px; color: var(--fg-dim); }
+.form label.inline { flex-direction: row; align-items: center; gap: .4rem; }
+
+/* --- detail ------------------------------------------------------------- */
+
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: .4rem 1.25rem; padding: 1rem; font-size: 13px; }
+.kv dt { color: var(--fg-dim); }
+.kv dd { margin: 0; font-family: var(--mono); word-break: break-all; }
+
+pre.evidence {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: .6rem .8rem;
+  margin: .5rem 0 0;
+  overflow-x: auto;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--medium);
+}
+
+.detail-row td { background: var(--bg); }
+.actions { display: flex; gap: .4rem; flex-wrap: wrap; margin-top: .75rem; }
+
+/* --- toast -------------------------------------------------------------- */
+
+.toast {
+  position: fixed;
+  bottom: 1.25rem;
+  right: 1.25rem;
+  background: var(--bg-raise);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  padding: .7rem 1rem;
+  max-width: 420px;
+  box-shadow: 0 8px 24px rgba(0,0,0,.5);
+  z-index: 50;
+}
+.toast.bad { border-left-color: var(--critical); }
+.toast.good { border-left-color: var(--ok); }

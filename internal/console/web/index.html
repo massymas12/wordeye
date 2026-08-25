@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WordEye Console</title>
+<link rel="stylesheet" href="/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22><text y=%2226%22 font-size=%2226%22>%F0%9F%91%81%EF%B8%8F</text></svg>">
+</head>
+<body>
+
+<!-- Sign-in ------------------------------------------------------------- -->
+<div id="auth" class="auth hidden">
+  <div class="auth-card">
+    <h1>WordEye<span class="dim">/console</span></h1>
+
+    <form id="login-form" class="step">
+      <label>Username<input id="login-user" autocomplete="username" required></label>
+      <label>Password<input id="login-pass" type="password" autocomplete="current-password" required></label>
+      <button type="submit">Sign in</button>
+      <p class="err" id="login-err"></p>
+    </form>
+
+    <form id="mfa-form" class="step hidden">
+      <p class="dim">Enter the 6-digit code from your authenticator, or a recovery code.</p>
+      <label>Code<input id="mfa-code" inputmode="text" autocomplete="one-time-code" required></label>
+      <button type="submit">Verify</button>
+      <p class="err" id="mfa-err"></p>
+    </form>
+
+    <div id="mfa-setup" class="step hidden">
+      <p class="dim">This console can order containment across your estate, so a second
+      factor is required before it will let you in.</p>
+      <img id="qr" alt="TOTP enrollment QR code" width="200" height="200">
+      <p class="mono tiny" id="secret"></p>
+      <form id="confirm-form">
+        <label>Enter the code shown in your app<input id="confirm-code" required></label>
+        <button type="submit">Confirm</button>
+        <p class="err" id="confirm-err"></p>
+      </form>
+    </div>
+
+    <div id="recovery" class="step hidden">
+      <h2>Recovery codes</h2>
+      <p class="warn">Shown once. Store them somewhere you can reach without this
+      console — they are the only way back in if you lose your authenticator.</p>
+      <pre class="mono" id="recovery-codes"></pre>
+      <button id="recovery-done">I have saved these</button>
+    </div>
+  </div>
+</div>
+
+<!-- Console -------------------------------------------------------------->
+<div id="app" class="hidden">
+  <header>
+    <div class="brand">WordEye<span class="dim">/console</span></div>
+    <nav>
+      <a href="#/fleet" data-view="fleet">Fleet</a>
+      <a href="#/findings" data-view="findings">Findings</a>
+      <a href="#/correlations" data-view="correlations">Correlation</a>
+      <a href="#/schedules" data-view="schedules">Schedules</a>
+      <a href="#/commands" data-view="commands">Commands</a>
+      <a href="#/estates" data-view="estates">Estates</a>
+      <a href="#/tokens" data-view="tokens" class="admin-only">Enrollment</a>
+      <a href="#/users" data-view="users" class="admin-only">Users</a>
+      <a href="#/audit" data-view="audit">Audit</a>
+    </nav>
+    <div class="who">
+      <span id="whoami" class="dim"></span>
+      <button id="logout" class="link">Sign out</button>
+    </div>
+  </header>
+
+  <section id="stats" class="tiles"></section>
+  <main id="view"></main>
+  <div id="toast" class="toast hidden"></div>
+</div>
+
+<script src="/app.js" type="module"></script>
+</body>
+</html>

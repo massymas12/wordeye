@@ -1,0 +1,35 @@
+# WordEye estate inventory.
+#
+# Transport is the system ssh/scp, so anything already working in ~/.ssh/config
+# (aliases, keys, ProxyJump, agent forwarding) works here unchanged.
+#
+#   wordeye --inventory estate.yaml --pack internal/rules/packs/incident.yaml --out ./reports
+#
+# A plain text file with one `user@host:port` per line is also accepted.
+
+defaults:
+  user: deploy
+  packs: [core]
+  # Flags appended to every remote agent invocation.
+  extra: ["--wp-cli"]
+
+hosts:
+  - host: site1.example.com
+    label: Marketing site
+
+  - host: site2.example.com
+    label: Storefront
+    # Hosts with several installs under one account.
+    all_sites: true
+
+  - host: 10.0.0.9
+    port: 2222
+    label: Legacy VPS
+    webroot: /var/www/html
+    # Reached through a bastion; passed straight to ssh/scp.
+    ssh_opts: ["-J", "bastion.example.com"]
+
+  - host: busy.example.com
+    label: High-traffic site
+    # Gentlest possible pass during business hours.
+    extra: ["--profile", "safe", "--quick"]
