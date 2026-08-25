@@ -184,3 +184,44 @@ func TestScheduleOffsetIsNeverNegative(t *testing.T) {
 		}
 	}
 }
+
+// Resuming a schedule whose firing time has passed must not detonate.
+//
+// next_run was left untouched by enable, so a schedule paused past 03:00 and
+// resumed on a Friday afternoon dispatched a fleet-wide sweep within one tick,
+// in the middle of the customer's business day.
+func TestResumingAStaleScheduleDoesNotFireImmediately(t *testing.T) {
+	db := consensusDB(t)
+	s, err := db.CreateSchedule(Schedule{Name: "nightly", Kind: "scan", MinuteOfDay: 3 * 60,
+		Weekdays: 0x7F, TZ: "UTC", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetScheduleEnabled(s.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	// Time passes; its slot goes by while paused.
+	if _, err := db.sql.Exec(`UPDATE schedules SET next_run = ? WHERE id = ?`,
+		time.Now().Add(-72*time.Hour).Unix(), s.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := db.SetScheduleEnabled(s.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	due, err := db.DueSchedules(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(due) != 0 {
+		t.Error("resuming a stale schedule fired it immediately across the estate")
+	}
+
+	list, err := db.ListSchedules(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || !list[0].NextRun.After(time.Now()) {
+		t.Errorf("next_run was not moved forward on resume: %v", list)
+	}
+}

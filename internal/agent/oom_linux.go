@@ -16,22 +16,26 @@ import (
 // of memory is a capacity problem; an agent killed by something on the host is a
 // security event, and reporting one as the other wastes an analyst's night in
 // either direction.
-func oomEvidence() string {
+func oomEvidence() (string, bool) {
 	// cgroup v2 keeps a counter of kills in this cgroup.
 	if b, err := os.ReadFile("/sys/fs/cgroup/memory.events"); err == nil {
 		if n := oomKillCount(string(b)); n > 0 {
 			return "The kernel's OOM killer has fired " + strconv.Itoa(n) +
-				" time(s) in this container, which is the likely cause and is a memory-capacity problem rather than a security event."
+				" time(s) in this container, which is the likely cause and is a memory-capacity problem rather than a security event.", true
 		}
+		// Counter readable and zero: a genuine negative we are entitled to state.
+		return "", true
 	}
 	// cgroup v1.
 	if b, err := os.ReadFile("/sys/fs/cgroup/memory/memory.oom_control"); err == nil {
 		if n := fieldValue(string(b), "oom_kill"); n > 0 {
 			return "The kernel's OOM killer has fired " + strconv.Itoa(n) +
-				" time(s) in this container, which is the likely cause."
+				" time(s) in this container, which is the likely cause.", true
 		}
+		return "", true
 	}
-	return ""
+	// Neither counter was readable: unknown, not absent.
+	return "", false
 }
 
 func oomKillCount(s string) int { return fieldValue(s, "oom_kill") }

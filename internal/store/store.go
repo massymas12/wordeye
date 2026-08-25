@@ -78,6 +78,7 @@ func addColumns(d *sql.DB) error {
 	for _, stmt := range []string{
 		`ALTER TABLE agents ADD COLUMN estate_id INTEGER REFERENCES estates(id) ON DELETE SET NULL`,
 		`ALTER TABLE enroll_tokens ADD COLUMN estate_id INTEGER REFERENCES estates(id) ON DELETE SET NULL`,
+		`ALTER TABLE commands ADD COLUMN not_before INTEGER NOT NULL DEFAULT 0`,
 	} {
 		if _, err := d.Exec(stmt); err != nil {
 			if strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
@@ -1068,10 +1069,22 @@ func (db *DB) NextCommandForAgent(agentID string) (*Command, error) {
 		return nil, err
 	}
 
+	// not_before is what actually staggers a scheduled sweep.
+	//
+	// The scheduler computes a per-agent offset so that a nightly scan does not
+	// start on every host in the same instant — beginning a full sweep on 236
+	// machines at once is a self-inflicted outage on shared infrastructure. That
+	// offset used to be written into the command's params, which nothing reads:
+	// the agent deliberately ignores params, and this query had no time
+	// predicate, so every host collected its command on the next heartbeat and
+	// the whole fleet swept inside one minute. Filtering here is what makes the
+	// stagger real.
 	var id string
 	err = tx.QueryRow(
-		`SELECT id FROM commands WHERE agent_id = ? AND status = 'approved' ORDER BY created_at LIMIT 1`,
-		agentID).Scan(&id)
+		`SELECT id FROM commands
+		  WHERE agent_id = ? AND status = 'approved' AND not_before <= ?
+		  ORDER BY created_at LIMIT 1`,
+		agentID, now()).Scan(&id)
 	if err == sql.ErrNoRows {
 		return nil, tx.Commit()
 	}
@@ -1323,4 +1336,22 @@ func (db *DB) SetFindingStatesByFilter(fl FindingFilter, state, by, note string)
 func (db *DB) SetAgentLastSeen(id string, at time.Time) error {
 	_, err := db.sql.Exec(`UPDATE agents SET last_seen = ? WHERE id = ?`, at.Unix(), id)
 	return err
+}
+
+// CreateCommandAt queues work that must not start before a given time.
+//
+// Used by the scheduler to spread a fleet-wide sweep across its jitter window.
+// Everything else goes through CreateCommand, which is this with no delay.
+func (db *DB) CreateCommandAt(agentID, kind string, params any, createdBy string, ttl time.Duration, notBefore time.Time) (*Command, error) {
+	c, err := db.CreateCommand(agentID, kind, params, createdBy, ttl)
+	if err != nil {
+		return nil, err
+	}
+	if !notBefore.IsZero() {
+		if _, err := db.sql.Exec(`UPDATE commands SET not_before = ? WHERE id = ?`,
+			notBefore.Unix(), c.ID); err != nil {
+			return nil, err
+		}
+	}
+	return c, nil
 }

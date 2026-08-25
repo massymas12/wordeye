@@ -289,9 +289,17 @@ func (a *Agent) analyzeFile(ctx context.Context, j fileJob, hit []bool, buf *[]b
 	}
 
 	if !readFull {
-		// Header probe: cheap, and enough to decide whether a media file is
-		// secretly a script.
-		hdr, err := readHead(j.abs, 1024)
+		// Header AND tail probe.
+		//
+		// The head alone answers "is this file secretly a script", but it can
+		// never answer "does this real image have a shell appended" — and that
+		// is what a polyglot IS. An attacker keeps the media header valid so
+		// upload filters that check magic bytes pass it, then appends the PHP
+		// after the pixel data. Probing only the first kilobyte made the whole
+		// fs.polyglot_file path unreachable for any image larger than 1KB; it
+		// looked correct because the test fixtures were ~50-byte GIFs that fit
+		// entirely inside the probe window.
+		hdr, err := probeHeadAndTail(j.abs, size, 1024, 8<<10)
 		if err != nil {
 			return 0, false, err
 		}
@@ -1328,10 +1336,14 @@ func isTestFixture(rel string) bool {
 	base := path.Base(rel)
 	switch {
 	case strings.HasPrefix(base, "class-tests-"), strings.HasPrefix(base, "test-"),
-		strings.HasSuffix(base, "-test.php"), strings.HasSuffix(base, "_test.php"),
-		strings.HasSuffix(base, "test.php") && strings.Contains(base, "test"):
+		strings.HasSuffix(base, "-test.php"), strings.HasSuffix(base, "_test.php"):
 		return true
 	}
+	// A bare "ends with test.php" case used to live here. It matched
+	// latest.php, greatest.php and protest.php — ordinary names, and worse,
+	// attacker-chosen ones: naming a shell wp-content/uploads/latest.php earned
+	// it an automatic severity downgrade and the misleading detail "this file is
+	// part of a test suite". A separator before "test" is what makes it a test.
 	return false
 }
 
@@ -1423,4 +1435,52 @@ func phpPayloadIsReal(b []byte, off int) bool {
 		}
 	}
 	return false
+}
+
+// probeHeadAndTail reads the first head bytes and the last tail bytes of a
+// file, concatenated.
+//
+// Reading only the head is what made polyglot detection unreachable: a real
+// image with a shell appended keeps a valid header for the whole probe window,
+// so the scan concluded "ordinary media" and returned before any engine ran.
+// Appending is how polyglots are built, so the tail is where the evidence is.
+//
+// The two windows are returned joined rather than separately because every
+// caller asks the same question of them — does a PHP open tag appear anywhere
+// in what we looked at — and a seam between two reads cannot split a five-byte
+// tag when each window is kilobytes wide.
+func probeHeadAndTail(path string, size int64, head, tail int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	if size <= head+tail {
+		// Small enough to read whole; no seam, no double-counting.
+		b := make([]byte, size)
+		n, err := io.ReadFull(f, b)
+		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+			return nil, err
+		}
+		return b[:n], nil
+	}
+
+	out := make([]byte, 0, head+tail)
+	hb := make([]byte, head)
+	n, err := io.ReadFull(f, hb)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return nil, err
+	}
+	out = append(out, hb[:n]...)
+
+	if _, err := f.Seek(size-tail, io.SeekStart); err != nil {
+		return out, nil // head alone is still worth something
+	}
+	tb := make([]byte, tail)
+	n, err = io.ReadFull(f, tb)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return out, nil
+	}
+	return append(out, tb[:n]...), nil
 }

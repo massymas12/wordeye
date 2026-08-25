@@ -105,13 +105,24 @@ func UncleanShutdownFinding(stateFile string) *model.Finding {
 		prior.PID, prior.Version, gap, prior.LastAlive.Format(time.RFC3339))
 
 	sev, conf := model.SevMedium, model.ConfLikely
-	if reason := oomEvidence(); reason != "" {
+	reason, checked := oomEvidence()
+	switch {
+	case reason != "":
 		detail += " " + reason
 		sev = model.SevLow
-	} else {
+	case checked:
+		// The counter was readable and said zero. That is a real negative and
+		// it is what makes an external kill the likely explanation.
 		detail += " No out-of-memory kill was recorded for this container, which makes an external " +
 			"kill the more likely explanation."
 		sev = model.SevHigh
+	default:
+		// We could not consult the counter. Saying "no OOM was recorded" here
+		// would be asserting a fact never established, and escalating on it
+		// would turn an ordinary container restart into a security incident.
+		detail += " Whether the kernel's OOM killer was involved could not be determined on this host, " +
+			"so an external kill is possible but unproven."
+		conf = model.ConfReview
 	}
 
 	return &model.Finding{

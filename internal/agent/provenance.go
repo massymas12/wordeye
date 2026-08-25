@@ -480,13 +480,16 @@ func (a *Agent) loadProvenance(ctx context.Context) {
 		fetch = httpFetcher(filepath.Join(a.cfg.Home, ".wordeye", "provenance"))
 	}
 	t0 := time.Now()
-	a.prov = a.buildProvenance(ctx, a.cfg.Webroot, fetch)
-	if a.prov != nil {
+	built := a.buildProvenance(ctx, a.cfg.Webroot, fetch)
+	if built != nil {
 		// Timed separately from the per-file hash comparisons. Conflating the
 		// two hid a fetch stage that was not running: the sweep-time lookups
 		// took 36ms, which looked entirely healthy.
-		a.prov.fetchMS = time.Since(t0).Milliseconds()
+		// Stamp before publishing: once the pointer is visible, other
+		// goroutines may be reading the struct.
+		built.fetchMS = time.Since(t0).Milliseconds()
 	}
+	a.setProvenance(built)
 }
 
 // provKind is the provenance verdict for one file.
@@ -506,7 +509,7 @@ const (
 
 // provenanceVerdict classifies a file during the sweep.
 func (a *Agent) provenanceVerdict(rel string, content []byte, truncated bool, abs string) provKind {
-	p := a.prov
+	p := a.provenance()
 	if p == nil || len(p.expected) == 0 || !p.isCovered(rel) {
 		// No publisher manifest covers this path. A vendor pack may still
 		// attest to it — that is the entire point of packs, since the
@@ -548,7 +551,8 @@ func (a *Agent) reportProvenance() {
 		Duration: time.Since(start).Round(time.Millisecond).String(),
 	})
 
-	if a.prov == nil || len(a.prov.expected) == 0 {
+	prov := a.provenance()
+	if prov == nil || len(prov.expected) == 0 {
 		return
 	}
 	v := a.provVerified.Load()
@@ -567,15 +571,15 @@ func (a *Agent) reportProvenance() {
 			"Manifests: %s. Verified files were exonerated and skipped by the pattern engines — a file identical to "+
 				"its published release cannot be a shell regardless of what functions it calls. "+
 				"%d modified, %d unexpected.",
-			strings.Join(a.prov.sources, ", "), m, u),
+			strings.Join(prov.sources, ", "), m, u),
 		Remediation: "For unverifiable directories, use the estate-wide hash correlation in the console: a premium " +
 			"plugin file identical across many sites is almost certainly genuine; one appearing on a single site is not.",
 		Meta: map[string]any{
 			"verified": v, "modified": m, "unexpected": u, "unverifiable": n,
-			"sources": a.prov.sources, "failures": a.prov.failures,
-			"plugins_covered":     a.prov.pluginsCovered,
-			"plugins_unpublished": a.prov.unpublished,
-			"fetch_ms":            a.prov.fetchMS,
+			"sources": prov.sources, "failures": prov.failures,
+			"plugins_covered":     prov.pluginsCovered,
+			"plugins_unpublished": prov.unpublished,
+			"fetch_ms":            prov.fetchMS,
 		},
 	})
 }
@@ -588,10 +592,11 @@ func (a *Agent) provenanceState() (model.CheckState, string) {
 		return model.CheckUnavailable,
 			"running offline: no manifests fetched, so nothing in this webroot has verified provenance"
 	}
-	if a.prov == nil || len(a.prov.expected) == 0 {
+	prov := a.provenance()
+	if prov == nil || len(prov.expected) == 0 {
 		reason := "no manifests obtained"
-		if a.prov != nil && len(a.prov.failures) > 0 {
-			reason += " (" + strings.Join(a.prov.failures, "; ") + ")"
+		if prov != nil && len(prov.failures) > 0 {
+			reason += " (" + strings.Join(prov.failures, "; ") + ")"
 		}
 		return model.CheckUnavailable, reason
 	}
@@ -604,9 +609,9 @@ func (a *Agent) provenanceState() (model.CheckState, string) {
 	// engines' output should be trusted. Reporting only "N verified" hid a run
 	// in which no plugin manifest loaded at all — and the unexonerated plugin
 	// tree then produced every false positive in the report.
-	if a.prov.pluginsCovered > 0 || len(a.prov.unpublished) > 0 {
-		reason += fmt.Sprintf("; %d plugin manifest(s) covered", a.prov.pluginsCovered)
-		if n := len(a.prov.unpublished); n > 0 {
+	if prov.pluginsCovered > 0 || len(prov.unpublished) > 0 {
+		reason += fmt.Sprintf("; %d plugin manifest(s) covered", prov.pluginsCovered)
+		if n := len(prov.unpublished); n > 0 {
 			reason += fmt.Sprintf(", %d unpublished (premium/bespoke, cannot be verified)", n)
 		}
 	}
@@ -617,13 +622,13 @@ func (a *Agent) provenanceState() (model.CheckState, string) {
 	if n := a.provAttested.Load(); n > 0 {
 		reason += fmt.Sprintf("; %d attested by estate consensus (not publisher checksums)", n)
 	}
-	if n := len(a.prov.failures); n > 0 {
+	if n := len(prov.failures); n > 0 {
 		// Name the actual error, not just the count. A bare "16 could not be
 		// fetched" sent an operator digging through finding metadata to learn
 		// whether it was DNS, a 429 or a timeout — which is the one thing
 		// needed to act on it.
 		return model.CheckUnavailable, fmt.Sprintf("%s; %d manifest(s) could not be obtained (%s)",
-			reason, n, a.prov.failures[0])
+			reason, n, prov.failures[0])
 	}
 	return model.CheckOK, reason
 }

@@ -179,8 +179,36 @@ func scanSchedule(r rowScanner) (*Schedule, error) {
 	return &s, nil
 }
 
+// SetScheduleEnabled pauses or resumes a schedule.
+//
+// Resuming recomputes next_run. Without that, a schedule paused past its firing
+// time detonates the moment it is re-enabled: an operator disables the 03:00
+// estate-wide scan on Monday for maintenance and re-enables it on Friday
+// afternoon, next_run is still Tuesday 03:00, and within one scheduler tick a
+// full sweep lands on every host in the estate in the middle of the customer's
+// business day. The jitter window only spreads that over a few working hours,
+// which is not a mitigation.
 func (db *DB) SetScheduleEnabled(id int64, enabled bool) error {
-	_, err := db.sql.Exec(`UPDATE schedules SET enabled = ? WHERE id = ?`, boolInt(enabled), id)
+	if !enabled {
+		_, err := db.sql.Exec(`UPDATE schedules SET enabled = 0 WHERE id = ?`, id)
+		return err
+	}
+	// QueryRow, not Query: the pool is capped at a single connection, so holding
+	// an open *sql.Rows while issuing the UPDATE below deadlocks the whole
+	// store waiting for a connection that this call is itself holding.
+	sch, err := scanSchedule(db.sql.QueryRow(
+		`SELECT id, name, COALESCE(estate_id,0), COALESCE(agent_id,''), kind, minute_of_day,
+		        weekdays, tz, enabled, jitter_minutes, last_run, next_run, created_at, created_by
+		   FROM schedules WHERE id = ?`, id))
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("no such schedule")
+	}
+	if err != nil {
+		return err
+	}
+	next := sch.NextRunAfter(time.Now())
+	_, err = db.sql.Exec(`UPDATE schedules SET enabled = 1, next_run = ? WHERE id = ?`,
+		next.Unix(), id)
 	return err
 }
 

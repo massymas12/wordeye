@@ -76,6 +76,13 @@ type Config struct {
 	Forward ForwardConfig
 
 	Logger *log.Logger
+	// TrustedProxies are CIDRs whose X-Forwarded-For header may be believed.
+	//
+	// Empty by default, which is the safe posture: without it the header is
+	// ignored entirely and the peer address is used. Set it only when the
+	// console genuinely sits behind a proxy you control, because anything in
+	// this list can rewrite the source IP on every audit record.
+	TrustedProxies []*net.IPNet
 }
 
 type Server struct {
@@ -340,20 +347,69 @@ func readJSON(w http.ResponseWriter, r *http.Request, maxBytes int64, dst any) e
 	return nil
 }
 
-func clientIP(r *http.Request) string {
-	// X-Forwarded-For is only meaningful behind a proxy you control. It is used
-	// for rate-limit keying and audit context, never for authorisation.
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		if i := strings.IndexByte(xff, ','); i > 0 {
-			return strings.TrimSpace(xff[:i])
-		}
-		return strings.TrimSpace(xff)
+// clientIP returns the peer address, and consults X-Forwarded-For only when
+// the immediate peer is a configured trusted proxy.
+//
+// The header used to be trusted unconditionally, which was remotely exploitable
+// without credentials. docker-compose publishes the ingest listener directly
+// ("8444:8444", no reverse proxy), and ingestSecurity keys the rate limiter on
+// this value BEFORE authentication. A client sending a unique X-Forwarded-For
+// per request therefore got a fresh limiter window every time — defeating both
+// the 240/min ingest cap and the 10/min login cap outright — while inserting a
+// new map entry per request that the janitor only prunes every ten minutes.
+// With Go's 1MB default header limit that is a memory-exhaustion primitive
+// against the console the whole fleet reports to.
+//
+// It also poisoned evidence: this value becomes the source IP on every audit
+// row and every forwarded SIEM event, so attribution in a security product was
+// attacker-controlled.
+//
+// The header is now used only when the connection actually came from a proxy
+// the operator listed, which is the only circumstance in which it means
+// anything.
+func (s *Server) clientIP(r *http.Request) string {
+	peer := peerIP(r)
+	if len(s.cfg.TrustedProxies) == 0 {
+		return peer
 	}
+	if !isTrustedProxy(peer, s.cfg.TrustedProxies) {
+		return peer
+	}
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		// Left-most entry is the original client, per the header's convention.
+		if i := strings.IndexByte(xff, ','); i > 0 {
+			xff = xff[:i]
+		}
+		// Bound it: this becomes a map key and an audit field.
+		if v := strings.TrimSpace(xff); v != "" && len(v) <= 45 && net.ParseIP(v) != nil {
+			return v
+		}
+	}
+	return peer
+}
+
+// peerIP is the address of whoever actually opened the connection. It cannot be
+// forged by a header.
+func peerIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+// isTrustedProxy reports whether an address falls inside any configured CIDR.
+func isTrustedProxy(ip string, cidrs []*net.IPNet) bool {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return false
+	}
+	for _, n := range cidrs {
+		if n != nil && n.Contains(parsed) {
+			return true
+		}
+	}
+	return false
 }
 
 // readAllLimited reads a whole body under a hard ceiling.

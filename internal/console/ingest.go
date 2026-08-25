@@ -64,7 +64,7 @@ func (s *Server) ingestSecurity(next http.Handler) http.Handler {
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Cache-Control", "no-store")
 
-		if !s.ingestLimiter.allow(clientIP(r)) {
+		if !s.ingestLimiter.allow(s.clientIP(r)) {
 			writeErr(w, http.StatusTooManyRequests, "rate limit exceeded")
 			return
 		}
@@ -89,7 +89,7 @@ func (s *Server) agentAuth(next func(http.ResponseWriter, *http.Request, *store.
 			writeErr(w, http.StatusUnauthorized, "malformed credential")
 			return
 		}
-		agent, err := s.db.AuthAgent(id, cred, clientIP(r))
+		agent, err := s.db.AuthAgent(id, cred, s.clientIP(r))
 		if err != nil {
 			// Deliberately vague: a probing client learns nothing about which
 			// agent ids exist.
@@ -139,7 +139,7 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "enrollment token is required")
 		return
 	}
-	ip := clientIP(r)
+	ip := s.clientIP(r)
 
 	tok, err := s.db.ConsumeEnrollToken(req.Token)
 	if err != nil {
@@ -236,7 +236,7 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request, agent *
 			_ = s.db.CompleteCommand(cmd.ID, "failed", "",
 				"agent refused: this host did not enroll with remote containment enabled")
 			_ = s.db.Audit("agent:"+agent.ID, "command.refused", cmd.ID,
-				"remote containment not permitted for this agent", clientIP(r), "denied")
+				"remote containment not permitted for this agent", s.clientIP(r), "denied")
 		} else {
 			resp.Command = &commandDispatch{ID: cmd.ID, Kind: cmd.Kind, Params: cmd.Params}
 		}
@@ -286,18 +286,23 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request, agent *sto
 	if len(req.Findings) > maxBatch {
 		req.Findings = req.Findings[:maxBatch]
 	}
-	accepted := 0
+	accepted, failed := 0, 0
 	for _, f := range req.Findings {
 		sanitizeFinding(&f)
 		if f.RuleID == "" {
 			continue
 		}
-		if err := s.db.UpsertFinding(agent.ID, f); err == nil {
-			accepted++
-			s.fwd.ForwardFinding(agent, f)
+		if err := s.db.UpsertFinding(agent.ID, f); err != nil {
+			failed++
+			s.log.Printf("events from %s: storing %s on %s: %v", agent.ID, f.RuleID, f.Path, err)
+			continue
 		}
+		accepted++
+		s.fwd.ForwardFinding(agent, f)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "accepted": accepted})
+	// The agent is told how many it could NOT store, so "delivered" stops
+	// meaning "the server returned 200".
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "accepted": accepted, "failed": failed})
 }
 
 // reportEnvelope is the subset of the agent report the console indexes. The
@@ -392,7 +397,7 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request, agent *sto
 	// 68,000-file site produced 25 findings; anything approaching this cap is
 	// either a broken agent or a hostile one, and both are better truncated
 	// loudly than served.
-	accepted, dropped := 0, 0
+	accepted, dropped, failed := 0, 0, 0
 	for _, f := range env.Findings {
 		if accepted >= maxFindingsPerReport {
 			dropped = len(env.Findings) - accepted
@@ -402,9 +407,17 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request, agent *sto
 		if f.RuleID == "" {
 			continue
 		}
-		if err := s.db.UpsertFinding(agent.ID, f); err == nil {
-			s.fwd.ForwardFinding(agent, f)
+		if err := s.db.UpsertFinding(agent.ID, f); err != nil {
+			// Storing a detection is the one thing this endpoint exists to do.
+			// Swallowing the error and counting it as accepted told the agent
+			// its webshell had landed while the row was never written and the
+			// SIEM never saw it — the scanner-reports-less-than-it-found
+			// failure this file is most concerned with.
+			failed++
+			s.log.Printf("report from %s: storing %s on %s: %v", agent.ID, f.RuleID, f.Path, err)
+			continue
 		}
+		s.fwd.ForwardFinding(agent, f)
 		accepted++
 	}
 	if dropped > 0 {
@@ -417,7 +430,7 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request, agent *sto
 			fmt.Sprintf("%d findings offered, %d stored", len(env.Findings), accepted), "", "warn")
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok": true, "findings": accepted, "dropped": dropped})
+		"ok": true, "findings": accepted, "dropped": dropped, "failed": failed})
 }
 
 // ---------------------------------------------------------------------------
@@ -463,10 +476,10 @@ func (s *Server) handleCommandResult(w http.ResponseWriter, r *http.Request, age
 			s.log.Printf("retiring %s after uninstall: %v", agent.ID, err)
 		}
 		_ = s.db.Audit("agent:"+agent.ID, "agent.uninstalled", agent.ID,
-			"agent confirmed uninstall and was retired", clientIP(r), "ok")
+			"agent confirmed uninstall and was retired", s.clientIP(r), "ok")
 	}
 
-	_ = s.db.Audit("agent:"+agent.ID, "command."+req.Status, req.ID, clamp(req.Error, 512), clientIP(r), req.Status)
+	_ = s.db.Audit("agent:"+agent.ID, "command."+req.Status, req.ID, clamp(req.Error, 512), s.clientIP(r), req.Status)
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -480,7 +493,7 @@ func sanitizeFinding(f *store.FindingInput) {
 	f.RuleID = clamp(f.RuleID, 128)
 	f.Class = clamp(f.Class, 32)
 	f.Severity = clampSeverity(f.Severity)
-	f.Confidence = clamp(f.Confidence, 32)
+	f.Confidence = clampConfidence(f.Confidence)
 	f.Title = clamp(f.Title, 512)
 	f.Detail = clamp(f.Detail, 8192)
 	f.Path = clamp(f.Path, 1024)
@@ -560,4 +573,27 @@ func (s *Server) handleVendorPack(w http.ResponseWriter, r *http.Request, a *sto
 		"min_sites":    2,
 		"entries":      entries,
 	})
+}
+
+// clampConfidence maps an agent-supplied confidence onto the known set.
+//
+// Severity was validated against an enum while confidence was merely trimmed to
+// 32 characters, which is a meaningful gap: confidence is load-bearing.
+// "confirmed" is the level that gates automated action, so a compromised agent
+// could post fabricated findings at the confidence that authorises deleting a
+// customer's file — or an arbitrary string that matches no branch and falls
+// silently through every comparison in the console and the UI.
+//
+// Anything unrecognised becomes "review", the level that asks a human to look.
+func clampConfidence(c string) string {
+	switch strings.ToLower(strings.TrimSpace(c)) {
+	case "confirmed":
+		return "confirmed"
+	case "likely":
+		return "likely"
+	case "review":
+		return "review"
+	default:
+		return "review"
+	}
 }

@@ -203,7 +203,7 @@ func (s *Server) audit(c *ctx, r *http.Request, action, target, detail, result s
 	if c != nil && c.user != nil {
 		actor = c.user.Username
 	}
-	_ = s.db.Audit(actor, action, target, detail, clientIP(r), result)
+	_ = s.db.Audit(actor, action, target, detail, s.clientIP(r), result)
 }
 
 // ---------------------------------------------------------------------------
@@ -230,7 +230,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "malformed request")
 		return
 	}
-	ip := clientIP(r)
+	ip := s.clientIP(r)
 	// Throttle by IP and by username: neither a single source nor a single
 	// target account can be ground down.
 	if !s.loginLimiter.allow(ip) || !s.loginLimiter.allow("u:"+req.Username) {
@@ -509,6 +509,13 @@ func (s *Server) withConsensus(findings []store.Finding) []annotatedFinding {
 			continue
 		}
 		est := s.db.EstateOfAgent(f.AgentID)
+		// An unassigned agent gets no cross-estate opinion. Zero means "every
+		// estate" to ConsensusFor, so annotating these findings would judge one
+		// customer's host against another customer's fleet and render that
+		// client's site counts to an operator triaging a different one.
+		if est == 0 {
+			continue
+		}
 		estateOf[i] = est
 		byEstate[est] = append(byEstate[est], f.SHA256)
 	}
@@ -710,6 +717,10 @@ type createTokenRequest struct {
 	TTLHours     int    `json:"ttl_hours"`
 	Uses         int    `json:"uses"`
 	AllowContain bool   `json:"allow_remote_contain"`
+	// EstateID scopes the token, and therefore every agent enrolled with it,
+	// to one customer. Zero leaves the agent unassigned, which now means it
+	// receives no cross-estate consensus at all.
+	EstateID int64 `json:"estate_id"`
 }
 
 func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request, c *ctx) {
@@ -727,8 +738,23 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request, c *ct
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// Bind the token to a customer when one was named.
+	//
+	// Without this every agent enrolled from a hand-minted token has no estate,
+	// and an agent with no estate is the case that used to receive the union of
+	// every customer's consensus. The installer path already scoped its tokens;
+	// this endpoint did not, so the ordinary way of adding a host produced
+	// exactly the unassigned agents that defeated the isolation.
+	if req.EstateID != 0 {
+		if err := s.db.SetTokenEstate(tok.ID, req.EstateID); err != nil {
+			writeErr(w, http.StatusBadRequest, "unknown estate")
+			return
+		}
+		tok.EstateID = req.EstateID
+	}
 	s.audit(c, r, "token.create", tok.Prefix,
-		fmt.Sprintf("label=%q uses=%d ttl=%s allow_contain=%v", tok.Label, tok.UsesAllowed, ttl, req.AllowContain), "ok")
+		fmt.Sprintf("label=%q uses=%d ttl=%s allow_contain=%v estate=%d",
+			tok.Label, tok.UsesAllowed, ttl, req.AllowContain, req.EstateID), "ok")
 
 	// The plaintext is returned exactly once and is not recoverable afterwards.
 	writeJSON(w, http.StatusOK, map[string]any{"token": plain, "meta": tok})

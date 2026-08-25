@@ -378,6 +378,24 @@ type Attestation struct {
 // Only single-path digests are attested. A vendor ships a file to one location;
 // anything else is not vendor-shaped and must not be exonerated.
 func (db *DB) VendorAttestations(estateID int64) ([]Attestation, error) {
+	// Zero is NOT "every estate" here, whatever it means elsewhere.
+	//
+	// This is the exoneration path: whatever it returns tells an agent to stop
+	// analysing a file. Everywhere else a zero estate harmlessly means "the
+	// operator is looking at everything", but an agent presenting estate 0 is
+	// an agent that was never assigned to a customer — and enrolment tokens
+	// minted through the admin endpoint set no estate at all, so that is the
+	// ordinary case, not an edge one.
+	//
+	// Serving it the union of every customer's consensus would let three
+	// compromised hosts in one estate exonerate the identical implant on an
+	// unrelated client's server, and would disclose one client's file paths and
+	// site counts to another. An unassigned agent therefore gets nothing: no
+	// attestations is a weaker position than it could be, but it is never the
+	// wrong one.
+	if estateID == 0 {
+		return nil, nil
+	}
 	cors, err := db.Correlate(2, estateID)
 	if err != nil {
 		return nil, err

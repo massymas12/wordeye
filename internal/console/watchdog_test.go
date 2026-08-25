@@ -1,7 +1,11 @@
 package console
 
 import (
+	"fmt"
+	"net"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -111,5 +115,137 @@ func TestWatchdogRateLimitsPerHost(t *testing.T) {
 func TestUninstallRequiresApproval(t *testing.T) {
 	if !store.DestructiveKinds["uninstall"] {
 		t.Error("uninstall can be dispatched without approval")
+	}
+}
+
+// The rate limiter fronting the internet-facing ingest listener is keyed on the
+// client address BEFORE authentication. Trusting X-Forwarded-For there meant an
+// unauthenticated attacker got a fresh limiter window per request — defeating
+// the cap entirely — while inserting a new map entry each time, which is a
+// memory-exhaustion primitive against the console the whole fleet reports to.
+func TestForwardedForIsIgnoredWithoutATrustedProxy(t *testing.T) {
+	h := newHarness(t)
+	r := httptest.NewRequest(http.MethodPost, "/v1/enroll", nil)
+	r.RemoteAddr = "203.0.113.7:44444"
+	r.Header.Set("X-Forwarded-For", "10.9.9.9")
+
+	if got := h.srv.clientIP(r); got != "203.0.113.7" {
+		t.Errorf("clientIP = %q, want the peer address 203.0.113.7 — a spoofed header was believed", got)
+	}
+}
+
+// Every request carrying a different forged header must still land on the same
+// limiter key, or the cap does not exist.
+func TestForgedForwardedForCannotSplitTheLimiterKey(t *testing.T) {
+	h := newHarness(t)
+	seen := map[string]bool{}
+	for i := 0; i < 50; i++ {
+		r := httptest.NewRequest(http.MethodPost, "/v1/enroll", nil)
+		r.RemoteAddr = "203.0.113.7:44444"
+		r.Header.Set("X-Forwarded-For", fmt.Sprintf("10.0.%d.%d", i/256, i%256))
+		seen[h.srv.clientIP(r)] = true
+	}
+	if len(seen) != 1 {
+		t.Errorf("50 forged headers produced %d distinct limiter keys; the cap is bypassable", len(seen))
+	}
+}
+
+// Behind a proxy the operator actually configured, the header is the only way
+// to see the real client, so it must be honoured there.
+func TestForwardedForIsHonouredBehindAConfiguredProxy(t *testing.T) {
+	h := newHarness(t)
+	_, cidr, err := net.ParseCIDR("10.1.0.0/16")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.srv.cfg.TrustedProxies = []*net.IPNet{cidr}
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/enroll", nil)
+	r.RemoteAddr = "10.1.2.3:5555"
+	r.Header.Set("X-Forwarded-For", "198.51.100.20, 10.1.2.3")
+	if got := h.srv.clientIP(r); got != "198.51.100.20" {
+		t.Errorf("clientIP = %q, want 198.51.100.20 from the trusted proxy", got)
+	}
+}
+
+// A trusted proxy sending rubbish must not put rubbish in the audit trail.
+func TestNonIPForwardedForIsRejected(t *testing.T) {
+	h := newHarness(t)
+	_, cidr, _ := net.ParseCIDR("10.1.0.0/16")
+	h.srv.cfg.TrustedProxies = []*net.IPNet{cidr}
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/enroll", nil)
+	r.RemoteAddr = "10.1.2.3:5555"
+	r.Header.Set("X-Forwarded-For", strings.Repeat("A", 900000))
+	if got := h.srv.clientIP(r); got != "10.1.2.3" {
+		t.Errorf("clientIP = %q; a non-IP header value was accepted as an address", got)
+	}
+}
+
+// The scheduler's stagger must actually delay work.
+//
+// The offset used to be written into the command's params, which nothing reads:
+// the agent ignores params by design and the dispatch query had no time
+// predicate. Every host therefore collected its command on the next heartbeat
+// and a "staggered" fleet-wide sweep landed inside one minute — the exact
+// self-inflicted outage the jitter window exists to prevent.
+func TestStaggeredCommandIsNotHandedOutEarly(t *testing.T) {
+	h := newHarness(t)
+	tok := h.mintToken(1, false)
+	ag, code, body := h.enrollAs(tok, false, "staggered-host", "/www")
+	if code != http.StatusOK {
+		t.Fatalf("enroll: %d %s", code, body)
+	}
+
+	if _, err := h.srv.DB().CreateCommandAt(ag.AgentID, "scan", map[string]any{"scheduled": true},
+		"scheduler", time.Hour, time.Now().Add(30*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	cmd, err := h.srv.DB().NextCommandForAgent(ag.AgentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cmd != nil {
+		t.Errorf("a command deferred 30 minutes was handed out immediately (%s)", cmd.Kind)
+	}
+}
+
+// And it must be handed out once its moment arrives, or the scan never runs.
+func TestStaggeredCommandIsHandedOutWhenDue(t *testing.T) {
+	h := newHarness(t)
+	tok := h.mintToken(1, false)
+	ag, _, _ := h.enrollAs(tok, false, "due-host", "/www")
+
+	if _, err := h.srv.DB().CreateCommandAt(ag.AgentID, "scan", map[string]any{"scheduled": true},
+		"scheduler", time.Hour, time.Now().Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	cmd, err := h.srv.DB().NextCommandForAgent(ag.AgentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cmd == nil {
+		t.Fatal("a due command was withheld")
+	}
+	if cmd.Kind != "scan" {
+		t.Errorf("kind %q", cmd.Kind)
+	}
+}
+
+// Ordinary operator-issued work must not be delayed at all.
+func TestUnstaggeredCommandIsImmediate(t *testing.T) {
+	h := newHarness(t)
+	tok := h.mintToken(1, false)
+	ag, _, _ := h.enrollAs(tok, false, "now-host", "/www")
+
+	if _, err := h.srv.DB().CreateCommand(ag.AgentID, "scan", nil, "operator", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	cmd, err := h.srv.DB().NextCommandForAgent(ag.AgentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cmd == nil {
+		t.Error("an operator-issued scan was withheld")
 	}
 }

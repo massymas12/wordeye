@@ -341,6 +341,18 @@ func TestConsensusExcludesRetiredAgents(t *testing.T) {
 	}
 }
 
+// assignEstate puts agents into a customer, which every real deployment does at
+// enrolment. Consensus is scoped per customer, so a test that means "one
+// estate's fleet" has to say so.
+func assignEstate(t *testing.T, db *DB, estateID int64, agentIDs ...string) {
+	t.Helper()
+	for _, id := range agentIDs {
+		if _, err := db.sql.Exec(`UPDATE agents SET estate_id = ? WHERE id = ?`, estateID, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 // The point of the whole feature: turning estate agreement into something an
 // agent can act on.
 //
@@ -357,12 +369,17 @@ func TestVendorAttestationsCoverCorroboratedPremiumCode(t *testing.T) {
 
 	// Four independent sites, accumulating over months as an installed base
 	// does rather than landing at once as a deployment does.
+	est, err := db.CreateEstate("Acme", "", "tester")
+	if err != nil {
+		t.Fatal(err)
+	}
 	for i, host := range []string{"a", "b", "c", "d"} {
 		sightAs(t, db, "ag_"+host, "host-"+host, "/www/"+host, p, sha, false,
 			base.Add(time.Duration(i)*14*24*time.Hour))
 	}
+	assignEstate(t, db, est.ID, "ag_a", "ag_b", "ag_c", "ag_d")
 
-	at, err := db.VendorAttestations(0)
+	at, err := db.VendorAttestations(est.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -401,7 +418,13 @@ func TestVendorAttestationsRefuseMovingPaths(t *testing.T) {
 			base.Add(time.Duration(i)*14*24*time.Hour))
 	}
 
-	at, err := db.VendorAttestations(0)
+	est, err := db.CreateEstate("Acme", "", "tester")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assignEstate(t, db, est.ID, "ag_a", "ag_b", "ag_c", "ag_d")
+
+	at, err := db.VendorAttestations(est.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -425,7 +448,13 @@ func TestVendorAttestationsRefuseASimultaneousArrival(t *testing.T) {
 		sightAs(t, db, "ag_"+host, "host-"+host, "/www/"+host, p, sha, false, now)
 	}
 
-	at, err := db.VendorAttestations(0)
+	est, err := db.CreateEstate("Acme", "", "tester")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assignEstate(t, db, est.ID, "ag_a", "ag_b", "ag_c", "ag_d")
+
+	at, err := db.VendorAttestations(est.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -433,5 +462,35 @@ func TestVendorAttestationsRefuseASimultaneousArrival(t *testing.T) {
 		if a.SHA256 == sha {
 			t.Error("a file that appeared on every site at once was attested as vendor code")
 		}
+	}
+}
+
+// The exoneration path must never fall open to "every estate".
+//
+// Zero is harmless elsewhere — an operator looking at everything — but an agent
+// presenting estate 0 was never assigned to a customer, and tokens minted
+// through the admin endpoint set no estate, so that is the ordinary case.
+// Serving such an agent the union of every customer's consensus lets three
+// compromised hosts in one estate exonerate the identical implant on an
+// unrelated client's server.
+func TestVendorAttestationsRefuseAnUnassignedAgent(t *testing.T) {
+	db := consensusDB(t)
+	base := time.Now().Add(-90 * 24 * time.Hour)
+	const sha = "un00000000000000000000000000000000000000000000000000000000000un"
+	const p = "wp-content/plugins/premium/lib.php"
+
+	// A well-corroborated file across four hosts, all unassigned (estate 0).
+	for i, host := range []string{"a", "b", "c", "d"} {
+		sightAs(t, db, "ag_"+host, "host-"+host, "/www/"+host, p, sha, false,
+			base.Add(time.Duration(i)*14*24*time.Hour))
+	}
+
+	at, err := db.VendorAttestations(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(at) != 0 {
+		t.Errorf("an unassigned agent was handed %d attestation(s); estate 0 must not mean every estate "+
+			"on the path that suppresses detection", len(at))
 	}
 }

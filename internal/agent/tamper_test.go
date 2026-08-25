@@ -1,6 +1,14 @@
 package agent
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	cryptorand "crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
+	"net/http"
 	"os"
 	"runtime"
 	"syscall"
@@ -114,4 +122,60 @@ func TestJudgeTerminationDistinguishesAdminFromIntruder(t *testing.T) {
 			t.Errorf("%s: no reason given", c.name)
 		}
 	}
+}
+
+// Certificate pinning must fail closed.
+//
+// An unparseable pin used to leave RootCAs nil, so the agent silently verified
+// against the system trust store — every public CA on earth — which is the
+// blind trust the pin exists to prevent. Anyone able to obtain a certificate
+// for the console's name could then terminate the agent's TLS and harvest the
+// bearer credential from its Authorization header.
+func TestUnparseableCAPinTrustsNothing(t *testing.T) {
+	c := newHTTPClient(false, "-----BEGIN CERTIFICATE-----\nnot base64 at all\n-----END CERTIFICATE-----\n")
+	tr, ok := c.Transport.(*http.Transport)
+	if !ok {
+		t.Fatal("transport is not *http.Transport")
+	}
+	if tr.TLSClientConfig == nil || tr.TLSClientConfig.RootCAs == nil {
+		t.Fatal("RootCAs is nil, so the client falls back to the system roots")
+	}
+	if n := len(tr.TLSClientConfig.RootCAs.Subjects()); n != 0 {
+		t.Errorf("pool holds %d roots; an unparseable pin must trust nothing", n)
+	}
+}
+
+// A valid pin must actually be installed, or nothing verifies the console.
+func TestValidCAPinIsInstalled(t *testing.T) {
+	pem := generateTestCAPEM(t)
+	c := newHTTPClient(false, pem)
+	tr := c.Transport.(*http.Transport)
+	if tr.TLSClientConfig.RootCAs == nil {
+		t.Fatal("a valid pin was not installed")
+	}
+	if n := len(tr.TLSClientConfig.RootCAs.Subjects()); n == 0 {
+		t.Error("the pool is empty despite a valid certificate")
+	}
+}
+
+// generateTestCAPEM produces a self-signed certificate in PEM form.
+func generateTestCAPEM(t *testing.T) string {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), cryptorand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "wordeye-test"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(cryptorand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
 }

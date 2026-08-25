@@ -132,6 +132,9 @@ func osWatchTargets(home string) []osTarget {
 		run: func(a *Agent, _ context.Context) { _, _ = a.checkHiddenImplants() }}
 	preload := &osCheck{name: "preload", debounce: osFileDebounce,
 		run: func(a *Agent, _ context.Context) { _, _ = a.checkPreload() }}
+	cron := &osCheck{name: "cron", debounce: osFileDebounce,
+		run: func(a *Agent, ctx context.Context) { _, _ = a.checkCron(ctx) }}
+	_ = preload
 
 	var out []osTarget
 	if home != "" {
@@ -147,7 +150,14 @@ func osWatchTargets(home string) []osTarget {
 			osTarget{filepath.Join(home, "bin"), implants},
 		)
 	}
-	out = append(out, osTarget{"/etc/cron.d", preload})
+	// /etc/cron.d must trigger the CRON check, not the preload one.
+	//
+	// It was wired to preload, which reads /etc/ld.so.preload and a few shell
+	// rc files and never looks at cron at all — so a root cron launcher dropped
+	// while the monitor ran fired inotify, re-scanned four unrelated files,
+	// emitted nothing, and burned the debounce. The real-time path for the one
+	// watchable cron directory was dead, leaving only the 60-second poll.
+	out = append(out, osTarget{"/etc/cron.d", cron})
 	return out
 }
 

@@ -495,7 +495,9 @@ func (a *Agent) analyzeHeuristic(src []byte, hit []bool, size int64, rel string,
 	// executable PHP than in a vendored dependency.
 	// Whether ANY authority could speak for this path. Without one, a core
 	// directory tells us nothing about whether the file belongs there.
-	provCovered := a.prov != nil && len(a.prov.expected) > 0
+	// Read through the accessor: the sweep goroutine may be replacing this.
+	prov := a.provenance()
+	provCovered := prov != nil && len(prov.expected) > 0
 	if w, why := locationWeight(rel, provCovered); w != 1.0 {
 		before := score
 		score = int(float64(score) * w)

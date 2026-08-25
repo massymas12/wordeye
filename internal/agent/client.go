@@ -114,10 +114,25 @@ func newHTTPClient(insecure bool, caPEM string) *http.Client {
 		tr.TLSClientConfig = &tls.Config{}
 	}
 	if caPEM != "" {
+		// Pinning must fail CLOSED.
+		//
+		// This previously assigned RootCAs only when the PEM parsed, so a DER
+		// file passed where PEM was expected — or a truncated certificate
+		// stamped into an installer — left RootCAs nil and the client verified
+		// against every publicly-trusted CA on earth. That is precisely the
+		// blind trust the pin exists to prevent: anyone able to obtain a
+		// certificate for the console's name could terminate the agent's TLS
+		// and harvest its bearer credential.
+		//
+		// An unparseable pin therefore yields an EMPTY pool, which trusts
+		// nothing. The agent fails to connect with an unknown-authority error
+		// instead of connecting to the wrong thing, which is the outcome an
+		// operator who supplied a CA actually asked for.
 		pool := x509.NewCertPool()
-		if pool.AppendCertsFromPEM([]byte(caPEM)) {
-			tr.TLSClientConfig.RootCAs = pool
+		if !pool.AppendCertsFromPEM([]byte(caPEM)) {
+			pool = x509.NewCertPool() // trusts nothing; every handshake fails
 		}
+		tr.TLSClientConfig.RootCAs = pool
 	}
 	if insecure {
 		tr.TLSClientConfig.InsecureSkipVerify = true
@@ -497,7 +512,7 @@ func (c *Client) runMonitor(ctx context.Context, logf func(string, ...any)) {
 	// storm against the console.
 	a.SetSink(func(f model.Finding) {
 		c.mu.Lock()
-		if len(c.pending) < 5000 {
+		if len(c.pending) < maxPendingFindings {
 			c.pending = append(c.pending, f)
 		}
 		c.mu.Unlock()
@@ -538,16 +553,57 @@ func (c *Client) flushEvents(ctx context.Context) {
 	if len(batch) == 0 {
 		return
 	}
-	c.lastFlush.Store(int64(len(batch)))
-	if err := c.post(ctx, "/v1/events", map[string]any{"findings": batch}, nil); err != nil {
+
+	// Read the acknowledgement. A 200 is not proof of storage: the console
+	// reports how many findings it could not write, and counting those as
+	// delivered is how a detection disappears with both ends believing it
+	// landed.
+	var ack struct {
+		Accepted int `json:"accepted"`
+		Failed   int `json:"failed"`
+	}
+	err := c.post(ctx, "/v1/events", map[string]any{"findings": batch}, &ack)
+	if err == nil && ack.Failed > 0 {
+		err = fmt.Errorf("console stored %d of %d findings", ack.Accepted, len(batch))
+	}
+
+	if err != nil {
 		c.lastFlushErr.Store(err.Error())
-		// Put them back so a transient console outage does not lose detections.
-		c.mu.Lock()
-		c.pending = append(batch, c.pending...)
-		if len(c.pending) > 5000 {
-			c.pending = c.pending[:5000]
-		}
-		c.mu.Unlock()
+		c.requeue(batch)
+		return
+	}
+
+	// Telemetry is recorded only on success, and the previous error is cleared.
+	//
+	// Both directions used to be wrong: the count was stored BEFORE the POST,
+	// so a failed attempt reported N findings delivered, and the error was
+	// never cleared, so one transient blip made every later flush look broken
+	// forever. That defeats the entire purpose of these fields, which exist
+	// because an agent that detects but cannot deliver looks identical to one
+	// that detects nothing.
+	c.lastFlush.Store(int64(len(batch)))
+	c.lastFlushErr.Store("")
+}
+
+// requeue puts an undelivered batch back, keeping the NEWEST detections.
+//
+// The truncation used to slice from the front, which keeps the oldest and
+// discards whatever arrived during the outage — exactly backwards. During an
+// incident the newest events are the ones an analyst needs, and an intruder
+// actively writing shells while the console is unreachable is precisely when
+// the queue overflows.
+func (c *Client) requeue(batch []model.Finding) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.pending = append(batch, c.pending...)
+	if len(c.pending) > maxPendingFindings {
+		drop := len(c.pending) - maxPendingFindings
+		// Copy into a fresh slice: re-slicing keeps the old backing array
+		// alive, so the dropped findings would never actually be released.
+		kept := make([]model.Finding, maxPendingFindings)
+		copy(kept, c.pending[drop:])
+		c.pending = kept
 	}
 }
 
@@ -633,7 +689,7 @@ func (c *Client) getJSON(ctx context.Context, path string, out any) error {
 // next heartbeat.
 func (c *Client) queueFinding(f model.Finding) {
 	c.mu.Lock()
-	if len(c.pending) < 5000 {
+	if len(c.pending) < maxPendingFindings {
 		c.pending = append(c.pending, f)
 	}
 	c.mu.Unlock()
@@ -697,21 +753,42 @@ func (c *Client) watchForTermination(ctx context.Context, stop <-chan struct{}, 
 func (c *Client) uninstall(ctx context.Context, id string, logf func(string, ...any)) {
 	logf("uninstall requested by the console")
 
-	// Say goodbye first, while the credential still works.
+	// Do the work FIRST, then report what actually happened.
+	//
+	// This used to POST an unconditional "done ... credential and state
+	// removed" before attempting any deletion, so a permission failure — or a
+	// StateFile that was never configured, which skipped the block entirely —
+	// was recorded by the console as a clean decommission while a working
+	// credential stayed on disk. The UninstallFinding branch that reports
+	// failures was unreachable and its removed/failed metadata was always
+	// empty.
+	//
+	// The credential is still valid at this point, which is what makes
+	// reporting possible at all: the ordering is deletion, then a report sent
+	// with the credential we are about to invalidate.
 	res := UninstallResult{}
+	status, summary := "done", "agent uninstalled; local credential and state removed"
+	if c.cfg.StateFile == "" {
+		status = "failed"
+		summary = "no state file is configured, so there was no credential to remove"
+	} else {
+		// Mark a clean exit before removing state: if the process is killed
+		// mid-uninstall, the next start must not report tampering for what was
+		// an authorised removal.
+		_ = MarkCleanExit(c.cfg.StateFile, time.Now())
+		res = PerformUninstall(c.cfg.StateFile)
+		if len(res.Failed) > 0 {
+			status = "failed"
+			summary = fmt.Sprintf("uninstall incomplete: %d item(s) could not be removed: %v",
+				len(res.Failed), res.Failed)
+		}
+	}
+
 	f := UninstallFinding(res, "console")
 	_ = c.post(ctx, "/v1/events", map[string]any{"findings": []model.Finding{f}}, nil)
 	_ = c.post(ctx, "/v1/command/result", map[string]any{
-		"id": id, "status": "done", "result": "agent uninstalled; local credential and state removed",
+		"id": id, "status": status, "result": summary,
 	}, nil)
-
-	// Record a clean exit before removing state, so that if the process is
-	// killed mid-uninstall the next start does not report tampering for what
-	// was an authorised removal.
-	if c.cfg.StateFile != "" {
-		_ = MarkCleanExit(c.cfg.StateFile, time.Now())
-		res = PerformUninstall(c.cfg.StateFile)
-	}
 	for _, p := range res.Removed {
 		logf("removed %s", p)
 	}
@@ -728,3 +805,8 @@ func (c *Client) uninstall(ctx context.Context, id string, logf func(string, ...
 func (c *Client) requestShutdown() {
 	c.shutdownOnce.Do(func() { close(c.shutdown) })
 }
+
+// maxPendingFindings bounds the undelivered-detection queue. A resident agent
+// must not grow without limit while a console is unreachable, but it must keep
+// enough to describe an active incident when the link returns.
+const maxPendingFindings = 5000

@@ -80,13 +80,20 @@ func (s *Server) dispatchSchedule(sch store.Schedule, agents []store.Agent, now 
 		// that is offline at its slot still picks the work up when it returns —
 		// but not days later, when the operator has forgotten it was asked for.
 		ttl := 12*time.Hour + sch.AgentOffset(a.ID)
+		// The offset is applied to the COMMAND, not written into params.
+		//
+		// It used to be a params field, which nothing reads — the agent ignores
+		// params by design and the dispatch query had no time predicate — so
+		// every host picked its command up on the next heartbeat and the whole
+		// fleet swept inside one minute. Passing it to the store is what makes
+		// the stagger real.
+		notBefore := now.Add(sch.AgentOffset(a.ID))
 		params := map[string]any{
 			"scheduled":   true,
 			"schedule":    sch.Name,
-			"not_before":  now.Add(sch.AgentOffset(a.ID)).UTC().Format(time.RFC3339),
 			"jitter_mins": sch.Jitter,
 		}
-		if _, err := s.db.CreateCommand(a.ID, sch.Kind, params, "scheduler", ttl); err != nil {
+		if _, err := s.db.CreateCommandAt(a.ID, sch.Kind, params, "scheduler", ttl, notBefore); err != nil {
 			s.log.Printf("scheduler: queueing %s for %s: %v", sch.Kind, a.ID, err)
 			continue
 		}

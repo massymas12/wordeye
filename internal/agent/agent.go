@@ -109,6 +109,14 @@ type Agent struct {
 	// refresh this, and they run on different goroutines. The race detector
 	// caught them writing it concurrently — a torn slice header here would be
 	// read by the memory and network checks as a live process list.
+	// prov is replaced wholesale by the periodic sweep goroutine while the
+	// inotify event loop reads it on every real-time evaluation. Unsynchronised
+	// this is a race with a wrong-output failure mode, not just a detector
+	// warning: a shell written at the instant provenance reloads is judged
+	// against a nil or half-built set, so the file is scored as if no publisher
+	// authority existed — or a stock core file is re-analysed and reported
+	// critical, which is the false-positive wall provenance exists to stop.
+	provMu    sync.RWMutex
 	procMu    sync.RWMutex
 	procCache []*procInfo
 
@@ -525,4 +533,19 @@ func (a *Agent) procSnapshot() []*procInfo {
 	a.procMu.RLock()
 	defer a.procMu.RUnlock()
 	return a.procCache
+}
+
+// setProvenance publishes a freshly-built provenance set.
+func (a *Agent) setProvenance(p *provenanceSet) {
+	a.provMu.Lock()
+	a.prov = p
+	a.provMu.Unlock()
+}
+
+// provenance returns the current set for readers on other goroutines. The set
+// is never mutated after publication, so the pointer is safe to use once read.
+func (a *Agent) provenance() *provenanceSet {
+	a.provMu.RLock()
+	defer a.provMu.RUnlock()
+	return a.prov
 }

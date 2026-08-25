@@ -390,3 +390,31 @@ func TestModifiedFileGradingDoesNotPanic(t *testing.T) {
 		t.Error("no modified-file finding was emitted")
 	}
 }
+
+// isTestFixture matched any filename ending in the letters "test.php", so
+// latest.php, greatest.php and protest.php were all treated as test suites —
+// and an attacker naming a shell wp-content/uploads/latest.php earned an
+// automatic severity downgrade plus the detail "this file is part of a test
+// suite". A separator before "test" is what makes something a test.
+func TestIsTestFixtureIgnoresOrdinaryNamesEndingInTest(t *testing.T) {
+	for _, p := range []string{
+		"wp-content/uploads/latest.php",
+		"wp-content/plugins/foo/greatest.php",
+		"wp-content/uploads/protest.php",
+		"wp-content/themes/x/contest.php",
+	} {
+		if isTestFixture(p) {
+			t.Errorf("isTestFixture(%q) = true; a shell here would be silently downgraded", p)
+		}
+	}
+	for _, p := range []string{
+		"wp-content/plugins/acme/tests/class-tests-admin.php",
+		"wp-content/plugins/acme/includes/foo-test.php",
+		"wp-content/plugins/acme/includes/foo_test.php",
+		"wp-content/plugins/acme/includes/test-foo.php",
+	} {
+		if !isTestFixture(p) {
+			t.Errorf("isTestFixture(%q) = false, want true", p)
+		}
+	}
+}

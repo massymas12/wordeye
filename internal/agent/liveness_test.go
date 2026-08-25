@@ -1,10 +1,13 @@
 package agent
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"wordeye/internal/model"
 )
 
 // An intruder who finds an EDR agent on a host they control will try to stop
@@ -169,5 +172,44 @@ func TestUninstallFindingIsInformational(t *testing.T) {
 	}
 	if f.RuleID != "agent.uninstalled" {
 		t.Errorf("rule %q", f.RuleID)
+	}
+}
+
+// During an incident the newest detections are the ones an analyst needs.
+//
+// The requeue used to truncate from the front, keeping the oldest backlog and
+// discarding everything the monitor found while the console was unreachable —
+// so an intruder writing shells during an outage produced exactly the findings
+// that got dropped.
+func TestRequeueKeepsTheNewestDetections(t *testing.T) {
+	c := &Client{}
+
+	// The real flow: flushEvents took everything as `batch`, the POST failed,
+	// and the monitor appended newer detections to c.pending meanwhile. So the
+	// failed batch is the OLDER half.
+	failed := make([]model.Finding, maxPendingFindings)
+	for i := range failed {
+		failed[i] = model.Finding{RuleID: "old", Path: fmt.Sprintf("old-%d.php", i)}
+	}
+	fresh := make([]model.Finding, 10)
+	for i := range fresh {
+		fresh[i] = model.Finding{RuleID: "fresh", Path: fmt.Sprintf("fresh-%d.php", i)}
+	}
+	c.pending = fresh
+
+	c.requeue(failed)
+
+	if len(c.pending) != maxPendingFindings {
+		t.Fatalf("queue length %d, want %d", len(c.pending), maxPendingFindings)
+	}
+	var freshKept int
+	for _, f := range c.pending {
+		if f.RuleID == "fresh" {
+			freshKept++
+		}
+	}
+	if freshKept != len(fresh) {
+		t.Errorf("kept %d of %d fresh detections; the newest are the ones that matter",
+			freshKept, len(fresh))
 	}
 }
