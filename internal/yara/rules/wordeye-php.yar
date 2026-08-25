@@ -357,12 +357,39 @@ rule php_dropper_writes_executable
         severity    = "critical"
         author      = "WordEye"
     strings:
+        // The request input must be INSIDE the write call, not merely
+        // somewhere in the same file.
+        //
+        // Requiring the three tokens independently made this fire on every
+        // plugin that updates itself: updraftplus writes files in one method
+        // and reads $_POST in an admin handler hundreds of lines away, and
+        // bdthemes-element-pack does the same in its rollback and setup-wizard
+        // code. A 126-host estate reported it on four separate hosts, all of
+        // it ordinary update machinery. Writing files is what an updater does;
+        // writing what the REQUEST said is what a dropper does.
+        $direct = /(file_put_contents|fwrite|fputs)\s*\([^;]{0,140}\$_(GET|POST|REQUEST|COOKIE|FILES)/ nocase
+        $p  = /[\x22\x27]\.ph(p|tml)[0-9]?[\x22\x27]/ nocase
+    condition:
+        is_php and $direct and $p and filesize < 300KB
+}
+
+rule php_writes_executable_near_request_input
+{
+    meta:
+        description = "Writes a PHP file in code that also reads request input - review the data flow"
+        severity    = "medium"
+        author      = "WordEye"
+    strings:
         $w1 = "file_put_contents" ascii nocase
         $w2 = "fwrite"            ascii nocase fullword
         $p  = /[\x22\x27]\.ph(p|tml)[0-9]?[\x22\x27]/ nocase
         $in = /\$_(GET|POST|REQUEST|COOKIE|FILES)/
     condition:
+        // The old co-occurrence test, kept at a severity matching what it
+        // actually proves. An updater trips this legitimately, so it asks for
+        // a human read rather than leading the queue.
         is_php and any of ($w*) and $p and $in and filesize < 300KB
+        and not php_dropper_writes_executable
 }
 
 rule php_polyglot_asset

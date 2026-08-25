@@ -526,17 +526,47 @@ func (db *DB) ListAgents(includeRetired bool, estateID int64) ([]Agent, error) {
 	return out, rows.Err()
 }
 
+// GetAgent fetches one agent, aggregating only that agent's findings.
+//
+// This used to call ListAgents(true, 0) — a LEFT JOIN over findings with three
+// conditional SUMs and a GROUP BY across the WHOLE fleet — and then linear-scan
+// the result in Go for a single row. It is called on every agent-detail page
+// load, on every command creation (so once per host in a bulk dispatch), and on
+// every scheduled dispatch. With 130 hosts and a few thousand findings each,
+// pressing "Upgrade agents" meant 130 full-fleet aggregates, serialised behind
+// SetMaxOpenConns(1) while agent heartbeats queued.
 func (db *DB) GetAgent(id string) (*Agent, error) {
-	agents, err := db.ListAgents(true, 0)
+	q := `SELECT a.id, a.hostname, a.label, a.site, a.webroot, a.version, a.os, a.arch,
+	             a.enrolled_at, a.last_seen, a.last_ip, a.allow_remote_contain,
+	             a.agent_opts_in_contain, a.monitor_active, a.retired,
+	             COALESCE(SUM(CASE WHEN f.state='open' AND f.severity='critical' THEN 1 ELSE 0 END),0),
+	             COALESCE(SUM(CASE WHEN f.state='open' AND f.severity='high'     THEN 1 ELSE 0 END),0),
+	             COALESCE(SUM(CASE WHEN f.state='open' THEN 1 ELSE 0 END),0),
+	             COALESCE(a.estate_id, 0)
+	      FROM agents a LEFT JOIN findings f ON f.agent_id = a.id
+	     WHERE a.id = ?
+	     GROUP BY a.id`
+
+	var a Agent
+	var enrolled, lastSeen int64
+	var allow, optIn, monitor, retired int
+	err := db.sql.QueryRow(q, id).Scan(&a.ID, &a.Hostname, &a.Label, &a.Site, &a.Webroot,
+		&a.Version, &a.OS, &a.Arch, &enrolled, &lastSeen, &a.LastIP, &allow, &optIn,
+		&monitor, &retired, &a.OpenCritical, &a.OpenHigh, &a.OpenTotal, &a.EstateID)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("agent not found")
+	}
 	if err != nil {
 		return nil, err
 	}
-	for i := range agents {
-		if agents[i].ID == id {
-			return &agents[i], nil
-		}
-	}
-	return nil, fmt.Errorf("agent not found")
+	a.EnrolledAt = time.Unix(enrolled, 0).UTC()
+	a.LastSeen = time.Unix(lastSeen, 0).UTC()
+	a.AllowRemoteContain = allow != 0
+	a.AgentOptsIn = optIn != 0
+	a.MonitorActive = monitor != 0
+	a.Retired = retired != 0
+	a.Status = statusFor(lastSeen)
+	return &a, nil
 }
 
 func (db *DB) RetireAgent(id string) error {
@@ -1360,4 +1390,46 @@ func (db *DB) CreateCommandAt(agentID, kind string, params any, createdBy string
 		}
 	}
 	return c, nil
+}
+
+// EstatesOfAgents resolves many agents to their estates in one query.
+//
+// The caller used to loop, issuing one SELECT per finding on a page — up to
+// 2000 round trips for a single /api/findings request, all serialised behind
+// the store's single connection while agent heartbeats queued behind them. The
+// distinct agent count on a page is at most the fleet size, so one query
+// answers the whole page.
+func (db *DB) EstatesOfAgents(agentIDs []string) (map[string]int64, error) {
+	out := map[string]int64{}
+	if len(agentIDs) == 0 {
+		return out, nil
+	}
+	seen := make(map[string]bool, len(agentIDs))
+	uniq := make([]any, 0, len(agentIDs))
+	for _, id := range agentIDs {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		uniq = append(uniq, id)
+	}
+	if len(uniq) == 0 {
+		return out, nil
+	}
+	ph := strings.TrimSuffix(strings.Repeat("?,", len(uniq)), ",")
+	rows, err := db.sql.Query(
+		`SELECT id, COALESCE(estate_id, 0) FROM agents WHERE id IN (`+ph+`)`, uniq...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var est int64
+		if err := rows.Scan(&id, &est); err != nil {
+			return nil, err
+		}
+		out[id] = est
+	}
+	return out, rows.Err()
 }

@@ -663,6 +663,23 @@ function toggleDetail(ev, f, showAgent) {
             } catch (e) { toast(e.message, 'bad'); }
           },
         }, 'Mark ' + s))),
+    // Attest is offered here as well as on the Correlated page.
+    //
+    // Dismissing a finding removes it from the consensus corpus, so an operator
+    // who dismisses their premium plugin on every host teaches the estate
+    // nothing and keeps re-dismissing it on each new one. Attesting stops the
+    // agents reporting it at all, which is what actually ends that loop.
+    f.sha256
+      ? el('div', { class: 'form' },
+          el('button', {
+            class: 'ghost',
+            title: 'Confirm these exact bytes at this exact path are genuine vendor code. '
+                 + 'Agents in the chosen estate stop analysing it from their next scan.',
+            onclick: () => attestArtefact(f.sha256, f.path || ''),
+          }, 'Mark as vendor code'),
+          el('span', { class: 'dim tiny', text: 'Use this rather than dismissing for known-good '
+            + 'premium code: dismissing hides one row, attesting stops every agent reporting it.' }))
+      : null,
     el('p', { class: 'dim tiny', text: STATE_HELP[f.state] || '' }));
   tr.after(el('tr', { class: 'detail-row' }, body));
 }
@@ -896,13 +913,61 @@ function correlationRows(c) {
       el('td', { class: 'tiny mono', title: paths.join('\n') },
         ...paths.slice(0, 2).map((x) => el('div', { text: x })),
         paths.length > 2 ? el('div', { class: 'dim', text: more(paths, 2).trim() }) : null),
-      el('td', {},
-        el('button', { class: 'ghost', onclick: () => openQuery('sha256:' + c.sha256) }, 'Investigate'))),
+      el('td', {}, el('div', { class: 'actions' },
+        el('button', { class: 'ghost', onclick: () => openQuery('sha256:' + c.sha256) }, 'Investigate'),
+        // Bypasses the seven-day consensus soak on a human judgement. The soak
+        // is right in general — bytes appearing everywhere at once are a
+        // deployment or an attack — but an operator who has READ the file and
+        // recognised their premium plugin is better evidence than counting how
+        // long the estate has known it.
+        c.verdict !== 'vendor' && (c.paths || []).length === 1
+          ? el('button', {
+              class: 'ghost',
+              title: 'Confirm this is genuine vendor code. Agents in this estate stop analysing '
+                   + 'these exact bytes at this exact path from their next scan.',
+              onclick: () => attestArtefact(c.sha256, (c.paths || [])[0] || ''),
+            }, 'Mark as vendor code')
+          : null))),
     // The verdict's reasoning, in full, on its own line. An operator has to be
     // able to disagree with the conclusion, which means seeing the argument.
     el('tr', { class: 'sub' },
       el('td', { colspan: '7', class: 'dim tiny', text: c.rationale || '' })),
   ];
+}
+
+
+// attest records an operator judgement that an artefact is genuine.
+//
+// Scoped to one estate deliberately: exonerating a file across every customer
+// on one person's word is not a decision the console will make. It is also
+// audited, because suppressing detection is exactly the kind of call that has
+// to be attributable afterwards.
+async function attestArtefact(sha256, path) {
+  const estates = await api.get('/api/estates').catch(() => []);
+  if (!estates.length) {
+    toast('Create an estate first — an attestation must name one customer.', 'bad');
+    return;
+  }
+  const names = estates.map((e, i) => (i + 1) + ') ' + e.name).join(String.fromCharCode(10));
+  const pick = prompt('Which customer does this attestation apply to?'
+    + String.fromCharCode(10) + String.fromCharCode(10) + names, '1');
+  if (!pick) return;
+  const est = estates[Number(pick) - 1];
+  if (!est) { toast('No such estate.', 'bad'); return; }
+
+  const note = prompt('Why is this genuine? (recorded in the audit log)',
+    'Verified against the vendor release') || '';
+  if (!confirm('Mark this as vendor code for ' + est.name + '?' + String.fromCharCode(10)
+      + String.fromCharCode(10)
+      + 'Agents in that estate will stop analysing these bytes at this path.')) return;
+
+  try {
+    const r = await api.post('/api/attestations', {
+      estate_id: est.id, sha256: sha256, path: path || '', note,
+    });
+    toast(r.note || 'Attested.', 'good');
+    route();
+  } catch (e) { toast(e.message, 'bad'); }
 }
 
 async function viewCorrelations(estateID) {

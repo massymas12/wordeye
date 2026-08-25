@@ -494,3 +494,111 @@ func TestVendorAttestationsRefuseAnUnassignedAgent(t *testing.T) {
 			"on the path that suppresses detection", len(at))
 	}
 }
+
+// An operator who has read a file and recognised their premium plugin is better
+// evidence than counting how long the estate has known it. Without this, a newly
+// onboarded estate spends its first week reporting its own Divi install as
+// critical — 35 of 58 criticals on a 44-host rollout were one such file.
+func TestOperatorAttestationBypassesTheSoak(t *testing.T) {
+	db := consensusDB(t)
+	est, err := db.CreateEstate("Acme", "", "tester")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sha = "divi0000000000000000000000000000000000000000000000000000000divi"
+	const p = "wp-content/themes/Divi/core/components/Portability.php"
+
+	// Freshly seen everywhere at once: consensus refuses, correctly.
+	now := time.Now()
+	for _, h := range []string{"a", "b", "c", "d"} {
+		sightAs(t, db, "ag_"+h, "host-"+h, "/www/"+h, p, sha, false, now)
+	}
+	assignEstate(t, db, est.ID, "ag_a", "ag_b", "ag_c", "ag_d")
+
+	at, err := db.VendorAttestations(est.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range at {
+		if a.SHA256 == sha {
+			t.Fatal("the soak was bypassed without an operator saying so")
+		}
+	}
+
+	// The operator reads the file and vouches for it.
+	if err := db.AttestArtefact(est.ID, sha, p, "verified against the Divi release", "analyst"); err != nil {
+		t.Fatal(err)
+	}
+	at, err = db.VendorAttestations(est.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, a := range at {
+		if a.SHA256 == sha && a.Path == p {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("an attested artefact was not included in the estate pack")
+	}
+}
+
+// An attestation suppresses detection, so it must never reach another customer.
+func TestAttestationDoesNotCrossEstates(t *testing.T) {
+	db := consensusDB(t)
+	a, _ := db.CreateEstate("Customer A", "", "tester")
+	b, _ := db.CreateEstate("Customer B", "", "tester")
+
+	const sha = "xx0000000000000000000000000000000000000000000000000000000000xx"
+	if err := db.AttestArtefact(a.ID, sha, "wp-content/plugins/x/y.php", "mine", "analyst"); err != nil {
+		t.Fatal(err)
+	}
+	other, err := db.VendorAttestations(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, at := range other {
+		if at.SHA256 == sha {
+			t.Fatal("one customer's attestation exonerated a file for another customer")
+		}
+	}
+}
+
+// Attesting across every estate at once is not a decision the console makes.
+func TestAttestationRequiresAnEstate(t *testing.T) {
+	db := consensusDB(t)
+	if err := db.AttestArtefact(0, "abc", "p.php", "", "analyst"); err == nil {
+		t.Error("an unscoped attestation was accepted")
+	}
+}
+
+// A digest is required: a path alone would exonerate whatever later occupies it.
+func TestAttestationRequiresADigest(t *testing.T) {
+	db := consensusDB(t)
+	est, _ := db.CreateEstate("Acme", "", "tester")
+	if err := db.AttestArtefact(est.ID, "", "wp-content/plugins/x/y.php", "", "analyst"); err == nil {
+		t.Error("an attestation with no digest was accepted")
+	}
+}
+
+// A mistaken judgement has to be undoable.
+func TestAttestationCanBeRevoked(t *testing.T) {
+	db := consensusDB(t)
+	est, _ := db.CreateEstate("Acme", "", "tester")
+	const sha = "rv0000000000000000000000000000000000000000000000000000000000rv"
+	const p = "wp-content/plugins/x/y.php"
+
+	if err := db.AttestArtefact(est.ID, sha, p, "looked fine", "analyst"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RevokeAttestation(est.ID, sha, p); err != nil {
+		t.Fatal(err)
+	}
+	at, _ := db.VendorAttestations(est.ID)
+	for _, a := range at {
+		if a.SHA256 == sha {
+			t.Error("a revoked attestation still exonerates")
+		}
+	}
+}

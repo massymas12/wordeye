@@ -55,6 +55,8 @@ func (s *Server) consoleHandler() http.Handler {
 	mux.HandleFunc("POST /api/webhooks/{id}/delete", s.admin(s.handleDeleteWebhook))
 	mux.HandleFunc("POST /api/webhooks/{id}/test", s.admin(s.handleTestWebhook))
 	mux.HandleFunc("GET /api/correlations", s.auth(s.handleCorrelations))
+	mux.HandleFunc("POST /api/attestations", s.write(s.handleAttest))
+	mux.HandleFunc("POST /api/attestations/revoke", s.write(s.handleRevokeAttest))
 	mux.HandleFunc("GET /api/reports", s.auth(s.handleReports))
 
 	mux.HandleFunc("GET /api/commands", s.auth(s.handleCommands))
@@ -506,6 +508,22 @@ func (s *Server) withConsensus(findings []store.Finding) []annotatedFinding {
 	// customers, and each finding must be judged only against its OWN estate:
 	// borrowing another client's machines to reach a quorum is both weaker
 	// evidence and a disclosure of that client's estate.
+	// One query for the whole page, not one per row. A 500-row page previously
+	// issued 500 sequential SELECTs against a single-connection store, blocking
+	// every concurrent agent write behind them.
+	ids := make([]string, 0, len(findings))
+	for _, f := range findings {
+		ids = append(ids, f.AgentID)
+	}
+	estates, err := s.db.EstatesOfAgents(ids)
+	if err != nil {
+		// Consensus is an enrichment; losing it must not lose the findings.
+		for i, f := range findings {
+			out[i] = annotatedFinding{Finding: f}
+		}
+		return out
+	}
+
 	byEstate := map[int64][]string{}
 	estateOf := make([]int64, len(findings))
 	for i, f := range findings {
@@ -513,7 +531,7 @@ func (s *Server) withConsensus(findings []store.Finding) []annotatedFinding {
 		if f.SHA256 == "" {
 			continue
 		}
-		est := s.db.EstateOfAgent(f.AgentID)
+		est := estates[f.AgentID]
 		// An unassigned agent gets no cross-estate opinion. Zero means "every
 		// estate" to ConsensusFor, so annotating these findings would judge one
 		// customer's host against another customer's fleet and render that
@@ -1077,4 +1095,53 @@ func (s *Server) handleBulkCommand(w http.ResponseWriter, r *http.Request, c *ct
 	s.audit(c, r, "command.bulk."+req.Kind, fmt.Sprintf("%d host(s)", len(req.Agents)),
 		fmt.Sprintf("queued=%d failed=%d", queued, failed), "ok")
 	writeJSON(w, http.StatusOK, map[string]any{"queued": queued, "failed": failed})
+}
+
+type attestRequest struct {
+	EstateID int64  `json:"estate_id"`
+	SHA256   string `json:"sha256"`
+	Path     string `json:"path"`
+	Note     string `json:"note"`
+}
+
+// handleAttest records that an operator has judged a file genuine.
+//
+// This suppresses detection for those exact bytes at that exact path, so it is
+// audited with who and why. It is also scoped to one estate: exonerating a file
+// across every customer on one operator's word is not a decision this console
+// will make.
+func (s *Server) handleAttest(w http.ResponseWriter, r *http.Request, c *ctx) {
+	var req attestRequest
+	if err := readJSON(w, r, 8<<10, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "malformed request")
+		return
+	}
+	if err := s.db.AttestArtefact(req.EstateID, req.SHA256, req.Path,
+		clamp(req.Note, 500), c.user.Username); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.audit(c, r, "artefact.attested", req.Path,
+		fmt.Sprintf("sha256=%s estate=%d note=%q", clamp(req.SHA256, 64), req.EstateID,
+			clamp(req.Note, 200)), "ok")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true,
+		"note": "Agents in this estate will stop analysing these bytes at this path from their " +
+			"next scan. Revoke it if that turns out to be wrong.",
+	})
+}
+
+func (s *Server) handleRevokeAttest(w http.ResponseWriter, r *http.Request, c *ctx) {
+	var req attestRequest
+	if err := readJSON(w, r, 8<<10, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "malformed request")
+		return
+	}
+	if err := s.db.RevokeAttestation(req.EstateID, req.SHA256, req.Path); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.audit(c, r, "artefact.attestation_revoked", req.Path,
+		fmt.Sprintf("sha256=%s estate=%d", clamp(req.SHA256, 64), req.EstateID), "ok")
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }

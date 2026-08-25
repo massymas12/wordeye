@@ -336,6 +336,32 @@ CREATE TABLE IF NOT EXISTS webhook_deliveries (
 CREATE INDEX IF NOT EXISTS webhook_deliveries_pending
     ON webhook_deliveries(delivered, last_sent);
 
+-- Operator attestations.
+--
+-- Consensus refuses to vouch for a digest until the estate has known it for a
+-- week, because a file that appears everywhere at once is a deployment or an
+-- attack rather than an installed base. That soak is correct and must stay.
+--
+-- But it means a newly-onboarded estate spends its first week reporting its own
+-- premium plugins as critical: 35 of 58 criticals on a 44-host rollout were one
+-- Divi file. An operator who has looked at that file and recognised it should be
+-- able to say so, and be believed immediately, because a human reading the code
+-- is stronger evidence than counting hosts.
+--
+-- Recorded with who and when: an attestation suppresses detection, so it is
+-- exactly the kind of decision that must be attributable afterwards.
+CREATE TABLE IF NOT EXISTS attestations (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    estate_id  INTEGER REFERENCES estates(id) ON DELETE CASCADE,
+    sha256     TEXT NOT NULL,
+    path       TEXT NOT NULL DEFAULT '',
+    note       TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    created_by TEXT NOT NULL DEFAULT ''
+);
+CREATE UNIQUE INDEX IF NOT EXISTS attestations_key
+    ON attestations(COALESCE(estate_id,0), sha256, path);
+
 CREATE TABLE IF NOT EXISTS audit (
     id     INTEGER PRIMARY KEY AUTOINCREMENT,
     at     INTEGER NOT NULL,

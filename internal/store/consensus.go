@@ -420,6 +420,83 @@ func (db *DB) VendorAttestations(estateID int64) ([]Attestation, error) {
 			SHA256: sha, Path: v.Paths[0], Tree: v.VendorTree, Sites: v.Sites,
 		})
 	}
+	// Fold in what an operator has vouched for by hand.
+	//
+	// These bypass the soak on purpose: a human who has read the file and
+	// recognised it as their premium plugin is better evidence than counting
+	// how long the estate has known it. Without this, a newly-onboarded estate
+	// spends its first week reporting its own Divi install as critical.
+	manual, err := db.OperatorAttestations(estateID)
+	if err == nil {
+		seen := make(map[string]bool, len(out))
+		for _, a := range out {
+			seen[a.SHA256+"|"+a.Path] = true
+		}
+		for _, a := range manual {
+			if !seen[a.SHA256+"|"+a.Path] {
+				out = append(out, a)
+			}
+		}
+	}
+
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
 	return out, nil
+}
+
+// AttestArtefact records an operator's judgement that a digest is genuine.
+//
+// This bypasses the consensus soak deliberately. The soak exists because bytes
+// appearing across an estate simultaneously are a deployment or an attack, not
+// an installed base — but a human who has read the file and recognised it as
+// their premium plugin is better evidence than that heuristic, not worse.
+//
+// The estate is required. An attestation exonerates, and one customer's
+// operator must not be able to suppress detection on another customer's hosts.
+func (db *DB) AttestArtefact(estateID int64, sha256, path, note, by string) error {
+	if estateID == 0 {
+		return fmt.Errorf("an attestation must name an estate: exonerating a file across every " +
+			"customer on one operator's word is not a decision this console will make")
+	}
+	if strings.TrimSpace(sha256) == "" {
+		return fmt.Errorf("an attestation needs a digest; a path alone would exonerate whatever " +
+			"later occupies that path")
+	}
+	_, err := db.sql.Exec(
+		`INSERT INTO attestations (estate_id, sha256, path, note, created_at, created_by)
+		 VALUES (?,?,?,?,?,?)
+		 ON CONFLICT(COALESCE(estate_id,0), sha256, path) DO UPDATE SET
+		   note = excluded.note, created_at = excluded.created_at, created_by = excluded.created_by`,
+		estateID, sha256, path, note, time.Now().Unix(), by)
+	return err
+}
+
+// RevokeAttestation withdraws one, so a mistaken judgement can be undone.
+func (db *DB) RevokeAttestation(estateID int64, sha256, path string) error {
+	_, err := db.sql.Exec(
+		`DELETE FROM attestations WHERE COALESCE(estate_id,0) = ? AND sha256 = ? AND path = ?`,
+		estateID, sha256, path)
+	return err
+}
+
+// OperatorAttestations returns the manual attestations for an estate.
+func (db *DB) OperatorAttestations(estateID int64) ([]Attestation, error) {
+	if estateID == 0 {
+		return nil, nil
+	}
+	rows, err := db.sql.Query(
+		`SELECT sha256, path FROM attestations WHERE COALESCE(estate_id,0) = ?`, estateID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Attestation
+	for rows.Next() {
+		var a Attestation
+		if err := rows.Scan(&a.SHA256, &a.Path); err != nil {
+			return nil, err
+		}
+		a.Sites = 0 // an operator's word, not a site count
+		out = append(out, a)
+	}
+	return out, rows.Err()
 }

@@ -3,6 +3,7 @@ package store
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // A delivery names which of a customer's sites is compromised and what was
@@ -139,3 +140,61 @@ func TestWebhookSecretIsNotSerialised(t *testing.T) {
 type errFake string
 
 func (e errFake) Error() string { return string(e) }
+
+// Scaling: a findings page must not cost one query per row.
+//
+// At 130 agents the console runs on a single database connection, so a 500-row
+// page issuing 500 sequential SELECTs blocks every agent heartbeat queued
+// behind it. One query answers the whole page.
+func TestEstatesOfAgentsResolvesInOneQuery(t *testing.T) {
+	db := consensusDB(t)
+	est, err := db.CreateEstate("Acme", "", "tester")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().Add(-24 * time.Hour)
+	for _, h := range []string{"a", "b", "c"} {
+		sightAs(t, db, "ag_"+h, "host-"+h, "/www/"+h, "p.php", "sha", false, base)
+	}
+	assignEstate(t, db, est.ID, "ag_a", "ag_b")
+
+	got, err := db.EstatesOfAgents([]string{"ag_a", "ag_b", "ag_c", "ag_a", "", "ag_missing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["ag_a"] != est.ID || got["ag_b"] != est.ID {
+		t.Errorf("assigned agents resolved to %v", got)
+	}
+	if got["ag_c"] != 0 {
+		t.Errorf("an unassigned agent resolved to estate %d, want 0", got["ag_c"])
+	}
+	if _, ok := got["ag_missing"]; ok {
+		t.Error("a nonexistent agent produced an entry")
+	}
+}
+
+// A single-agent lookup must aggregate only that agent's findings, not the
+// whole fleet's. It runs on every command creation, so a bulk dispatch to 130
+// hosts would otherwise mean 130 full-table aggregates.
+func TestGetAgentDoesNotAggregateTheFleet(t *testing.T) {
+	db := consensusDB(t)
+	base := time.Now().Add(-24 * time.Hour)
+	for _, h := range []string{"a", "b", "c"} {
+		sightAs(t, db, "ag_"+h, "host-"+h, "/www/"+h, "shell.php", "sha"+h, false, base)
+	}
+
+	a, err := db.GetAgent("ag_a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.ID != "ag_a" || a.Hostname != "host-a" {
+		t.Errorf("wrong agent returned: %+v", a)
+	}
+	// Its counts must reflect only its own findings.
+	if a.OpenTotal != 1 {
+		t.Errorf("OpenTotal = %d, want 1 — counts are leaking from other agents", a.OpenTotal)
+	}
+	if _, err := db.GetAgent("ag_nope"); err == nil {
+		t.Error("a missing agent did not error")
+	}
+}
