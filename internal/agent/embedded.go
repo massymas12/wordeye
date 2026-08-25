@@ -67,6 +67,11 @@ type EmbeddedConfig struct {
 	// works without --insecure. Without this the agent uses the system roots;
 	// it never falls back to skipping verification.
 	CAPEM string `json:"ca_pem,omitempty"`
+
+	// SigningKey is the PUBLIC half of the estate release key. It is stamped
+	// into the installer so that a host can verify a future upgrade against the
+	// build machine rather than trusting whichever console happens to answer.
+	SigningKey string `json:"signing_key,omitempty"`
 	// Monitor starts resident monitoring after enrollment rather than performing
 	// a single scan and exiting.
 	Monitor bool `json:"monitor,omitempty"`

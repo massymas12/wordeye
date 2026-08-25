@@ -50,6 +50,13 @@ type ClientConfig struct {
 	// AllowRemoteContain opts this host in to accepting destructive orders.
 	AllowRemoteContain bool
 
+	// SigningKey is the PUBLIC half of the estate release key, stamped in at
+	// install time. It is the only thing that decides whether a binary served
+	// by the console is allowed to replace this one, which is why the console
+	// never holds its private counterpart. Empty means this agent cannot verify
+	// a release and will refuse to upgrade at all.
+	SigningKey string
+
 	// Base is the scan configuration commands are executed with.
 	Base Config
 
@@ -395,6 +402,10 @@ func (c *Client) execute(ctx context.Context, id, kind string, logf func(string,
 		c.uninstall(ctx, id, logf)
 		return
 	}
+	if IsUpgradeRequest(err) {
+		c.upgrade(ctx, id, logf)
+		return
+	}
 	if err != nil {
 		logf("command %s failed: %v", id, err)
 		_ = c.post(ctx, "/v1/command/result", map[string]any{
@@ -462,6 +473,8 @@ func (c *Client) runCommand(ctx context.Context, kind string, logf func(string, 
 	case "uninstall":
 		// Handled entirely outside the scanning path: there is nothing to scan.
 		return nil, errUninstallRequested
+	case "upgrade":
+		return nil, errUpgradeRequested
 	default:
 		return nil, fmt.Errorf("unsupported command %q", kind)
 	}

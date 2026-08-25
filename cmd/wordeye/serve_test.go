@@ -3,7 +3,10 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"wordeye/internal/sign"
 )
 
 // A console that cannot start must say why, once, in terms an operator can act
@@ -64,5 +67,22 @@ func TestPlaintextIngestIsNotBlocked(t *testing.T) {
 func TestNoTLSConfiguredIsNotAnError(t *testing.T) {
 	if code := checkIngestTLS("", "", false); code != 0 {
 		t.Error("a console with no TLS flags at all was blocked")
+	}
+}
+
+// The two key strings differ only by a prefix, and pasting the private one into
+// --signing-key would put the key that authorises code execution across the
+// estate onto the internet-facing host — silently, because everything else
+// would still work. It is the worst configuration mistake available here.
+func TestPrivateSigningKeyIsRefusedOnTheConsole(t *testing.T) {
+	pub, priv, err := sign.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(priv, sign.PrivatePrefix) {
+		t.Fatal("private key is not prefixed as expected")
+	}
+	if strings.HasPrefix(pub, sign.PrivatePrefix) {
+		t.Error("a public key would be refused as private")
 	}
 }

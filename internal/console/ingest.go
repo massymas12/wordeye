@@ -1,9 +1,14 @@
 package console
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -49,6 +54,7 @@ func (s *Server) ingestHandler() http.Handler {
 	mux.HandleFunc("POST /v1/report", s.agentAuth(s.handleReport))
 	mux.HandleFunc("POST /v1/command/result", s.agentAuth(s.handleCommandResult))
 	mux.HandleFunc("GET /v1/vendor-pack", s.agentAuth(s.handleVendorPack))
+	mux.HandleFunc("GET /v1/agent-release", s.agentAuth(s.handleAgentRelease))
 	mux.HandleFunc("GET /v1/ping", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"service": "wordeye-ingest"})
 	})
@@ -596,4 +602,65 @@ func clampConfidence(c string) string {
 	default:
 		return "review"
 	}
+}
+
+// handleAgentRelease serves the signed release binary for an agent's platform.
+//
+// The console distributes code but does not vouch for it. It has no signing
+// key — deliberately, because it is the internet-facing component — so all it
+// can do is hand over bytes and the detached signature that came with them from
+// the build machine. The agent verifies that signature against a public key
+// stamped in at install time before it will execute anything.
+//
+// That division is what keeps a console compromise from becoming a fleet
+// compromise: an attacker who owns this server can serve any binary they like
+// and every agent will refuse it.
+//
+// A release with no .sig file is not served at all. Falling back to unsigned
+// distribution "just this once" would defeat the entire mechanism, and the
+// failure an operator sees — an upgrade that will not start — is far better
+// than one they do not.
+func (s *Server) handleAgentRelease(w http.ResponseWriter, r *http.Request, a *store.Agent) {
+	if s.cfg.AgentBinaryDir == "" {
+		writeErr(w, http.StatusNotImplemented, "this console does not distribute agent binaries")
+		return
+	}
+	goos, arch := a.OS, a.Arch
+	if v := r.URL.Query().Get("os"); v != "" {
+		goos = v
+	}
+	if v := r.URL.Query().Get("arch"); v != "" {
+		arch = v
+	}
+	if !validPlatform(goos + "-" + arch) {
+		writeErr(w, http.StatusBadRequest, "unsupported platform")
+		return
+	}
+
+	name := "wordeye-agent-" + goos + "-" + arch
+	if goos == "windows" {
+		name += ".exe"
+	}
+	bin := filepath.Join(s.cfg.AgentBinaryDir, name)
+	raw, err := os.ReadFile(bin)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "no release for this platform")
+		return
+	}
+	sigRaw, err := os.ReadFile(bin + ".sig")
+	if err != nil {
+		// Refuse rather than degrade. An unsigned release is one an agent must
+		// not run, so serving it would only produce a confusing failure later.
+		s.log.Printf("agent-release: %s has no signature; refusing to serve", name)
+		writeErr(w, http.StatusConflict,
+			"this release is not signed; sign it on the build machine with `wordeye sign-release`")
+		return
+	}
+
+	sum := sha256.Sum256(raw)
+	w.Header().Set("X-WordEye-Signature", strings.TrimSpace(string(sigRaw)))
+	w.Header().Set("X-WordEye-SHA256", hex.EncodeToString(sum[:]))
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Length", strconv.Itoa(len(raw)))
+	_, _ = w.Write(raw)
 }

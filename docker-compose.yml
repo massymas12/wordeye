@@ -12,6 +12,11 @@ services:
       context: .
       args:
         VERSION: ${WORDEYE_VERSION:-0.1.8}
+      # The release-signing key, used during the build and never written into a
+      # layer. Absent is fine: binaries ship unsigned and self-update is simply
+      # unavailable, which is the honest degradation.
+      secrets:
+        - signing_key
     image: wordeye:${WORDEYE_VERSION:-0.1.8}
     container_name: wordeye
     restart: unless-stopped
@@ -40,6 +45,9 @@ services:
       - --tls-cert=/certs/cert.pem
       - --tls-key=/certs/key.pem
       - --agent-binaries=/agents
+      # PUBLIC half only. The private key stays on the build machine; a console
+      # that could sign would be the single point of failure signing removes.
+      - --signing-key=${WORDEYE_SIGNING_PUBKEY:-}
       # Stamped into every generated installer, so it must be how client hosts
       # will actually reach this machine, and must appear in the certificate.
       # Fail at `up` rather than serving a console that cannot issue installers.
@@ -92,6 +100,13 @@ services:
       - --out=/certs
     volumes:
       - wordeye-certs:/certs
+
+secrets:
+  signing_key:
+    # Point this at the PRIVATE key on your build machine. It is read at build
+    # time only. On a host that is not your build machine, leave the file absent
+    # and releases go out unsigned.
+    file: ${WORDEYE_SIGNING_KEY_FILE:-./signing.key}
 
 volumes:
   wordeye-data:

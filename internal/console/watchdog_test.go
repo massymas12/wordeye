@@ -2,13 +2,17 @@ package console
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"wordeye/internal/sign"
 	"wordeye/internal/store"
 )
 
@@ -247,5 +251,88 @@ func TestUnstaggeredCommandIsImmediate(t *testing.T) {
 	}
 	if cmd == nil {
 		t.Error("an operator-issued scan was withheld")
+	}
+}
+
+// Upgrade replaces the security control on every host it reaches — strictly
+// more powerful than containment, which only removes a file an operator already
+// reviewed. A console able to push code unattended would turn a console
+// compromise into arbitrary execution across the estate.
+func TestUpgradeRequiresApproval(t *testing.T) {
+	if !store.DestructiveKinds["upgrade"] {
+		t.Error("upgrade can be dispatched without a second approver")
+	}
+}
+
+// The console must not be able to serve an unsigned release. Falling back to
+// unsigned distribution would defeat the entire mechanism.
+func TestUnsignedReleaseIsNotServed(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "wordeye-agent-linux-amd64"),
+		[]byte("\x7fELF unsigned"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	h := newHarness(t)
+	h.srv.cfg.AgentBinaryDir = dir
+
+	tok := h.mintToken(1, false)
+	ag, code, body := h.enrollAs(tok, false, "upgrade-host", "/www")
+	if code != http.StatusOK {
+		t.Fatalf("enroll: %d %s", code, body)
+	}
+
+	code, body = h.getJSON(h.ingest.URL, "/v1/agent-release?os=linux&arch=amd64", ag.auth(), nil)
+	if code == http.StatusOK {
+		t.Errorf("an unsigned release was served to an agent: %d %s", code, body)
+	}
+}
+
+// A signed release is served together with its detached signature, which is the
+// only thing the agent will act on.
+func TestSignedReleaseIsServedWithItsSignature(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "wordeye-agent-linux-amd64")
+	payload := []byte("\x7fELF a signed build")
+	if err := os.WriteFile(bin, payload, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pub, priv, err := sign.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig, err := sign.Sign(priv, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bin+".sig", []byte(sig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	h := newHarness(t)
+	h.srv.cfg.AgentBinaryDir = dir
+	tok := h.mintToken(1, false)
+	ag, _, _ := h.enrollAs(tok, false, "signed-host", "/www")
+
+	req, err := http.NewRequest(http.MethodGet, h.ingest.URL+"/v1/agent-release?os=linux&arch=amd64", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", ag.auth())
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	served := resp.Header.Get("X-WordEye-Signature")
+	if served == "" {
+		t.Fatal("no signature header; the agent would have nothing to verify")
+	}
+	if !sign.Verify(pub, got, served) {
+		t.Error("the served bytes do not verify against the signature served with them")
 	}
 }

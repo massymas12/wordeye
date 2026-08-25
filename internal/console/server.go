@@ -76,6 +76,16 @@ type Config struct {
 	Forward ForwardConfig
 
 	Logger *log.Logger
+	// ReleaseSigningPublicKey is stamped into every installer this console
+	// generates, so agents can verify future upgrades.
+	//
+	// The PUBLIC half only. The private key belongs on a build machine and must
+	// never reach this process: the whole point of signing releases is that
+	// compromising the console — the internet-facing component — does not let
+	// an attacker push code to the estate. A console that could sign would
+	// simply be the single point of failure the design exists to remove.
+	ReleaseSigningPublicKey string
+
 	// TrustedProxies are CIDRs whose X-Forwarded-For header may be believed.
 	//
 	// Empty by default, which is the safe posture: without it the header is

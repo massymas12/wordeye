@@ -1040,9 +1040,15 @@ func (s *Server) handleBulkCommand(w http.ResponseWriter, r *http.Request, c *ct
 	}
 	switch req.Kind {
 	case "scan", "baseline", "verify":
+	case "upgrade":
+		// Upgrade IS dispatchable in bulk — replacing agents one host at a time
+		// across an estate is the problem this exists to solve — but it stays
+		// approval-gated like containment, and every agent independently
+		// verifies the release signature before it will install anything. The
+		// console can ask; it cannot compel.
 	default:
 		writeErr(w, http.StatusBadRequest,
-			"only scan, baseline and verify may be run across multiple hosts")
+			"only scan, baseline, verify and upgrade may be run across multiple hosts")
 		return
 	}
 	if len(req.Agents) == 0 {

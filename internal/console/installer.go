@@ -117,11 +117,14 @@ func (s *Server) handleGenerateInstaller(w http.ResponseWriter, r *http.Request,
 	}
 
 	cfg := agent.EmbeddedConfig{
-		Server:      s.cfg.PublicURL,
-		Token:       plain,
-		Label:       strings.TrimSpace(req.Label),
-		Estate:      est.Name,
-		CAPEM:       s.publicCAPEM(),
+		Server: s.cfg.PublicURL,
+		Token:  plain,
+		Label:  strings.TrimSpace(req.Label),
+		Estate: est.Name,
+		CAPEM:  s.publicCAPEM(),
+		// So this host can verify a future upgrade against the build machine
+		// rather than trusting whichever console answers.
+		SigningKey:  s.cfg.ReleaseSigningPublicKey,
 		Monitor:     req.Monitor,
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 		GeneratedBy: c.user.Username,

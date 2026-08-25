@@ -954,11 +954,17 @@ type Command struct {
 // silently disable monitoring everywhere is exactly what an intruder who
 // reaches the console would use it for. Requiring a second human makes that
 // impossible from a single stolen session.
-var DestructiveKinds = map[string]bool{"contain": true, "uninstall": true}
+// upgrade joins this list for a reason of its own. It destroys nothing, but it
+// replaces the security control on every host it reaches — strictly more
+// powerful than containment, which only removes a file an operator already
+// reviewed. A console that could push code unattended would turn a console
+// compromise into arbitrary execution across the estate, so a second human is
+// required even though the agent independently verifies the signature.
+var DestructiveKinds = map[string]bool{"contain": true, "uninstall": true, "upgrade": true}
 
 func (db *DB) CreateCommand(agentID, kind string, params any, createdBy string, ttl time.Duration) (*Command, error) {
 	switch kind {
-	case "scan", "baseline", "verify", "contain", "contain_dryrun", "update_packs", "uninstall":
+	case "scan", "baseline", "verify", "contain", "contain_dryrun", "update_packs", "uninstall", "upgrade":
 	default:
 		return nil, fmt.Errorf("unknown command kind %q", kind)
 	}

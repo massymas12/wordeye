@@ -37,6 +37,23 @@ RUN GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w -X main.version=$
     GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
         -o /out/agents/wordeye-agent-linux-arm64 ./cmd/wordeye-agent
 
+# Sign the agent binaries, if a build key was supplied.
+#
+# The key arrives as a build secret and is never written into a layer: an image
+# carrying the private half would put the key that authorises code execution
+# across the estate onto the same host as the internet-facing console, which is
+# precisely what signing exists to prevent.
+#
+# Without a key the binaries ship unsigned, installers still work, and the
+# console refuses to serve a release for self-update. That is the honest
+# degradation: upgrades are unavailable rather than unverified.
+RUN --mount=type=secret,id=signing_key,required=false \
+    if [ -s /run/secrets/signing_key ]; then \
+        /out/wordeye sign-release --key /run/secrets/signing_key --dir /out/agents; \
+    else \
+        echo "no signing key supplied; agent self-update will be unavailable"; \
+    fi
+
 # Create the data and cert directories HERE, owned by the runtime user.
 # Docker seeds a fresh named volume from the image's directory, ownership
 # included, so this is what lets a non-root container write to its own volume

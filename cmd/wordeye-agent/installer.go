@@ -72,7 +72,7 @@ func runInstaller(cfg *agent.EmbeddedConfig) int {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		st, err = agent.Enroll(ctx, agent.ClientConfig{
 			Server: cfg.Server, Token: cfg.Token, StateFile: statePath,
-			Label: cfg.Label, CAPEM: cfg.CAPEM,
+			Label: cfg.Label, CAPEM: cfg.CAPEM, SigningKey: cfg.SigningKey,
 			// Deliberately NOT taken from the embedded config: the two-key rule
 			// means a host must opt in to destructive orders itself. A file
 			// that arrives pre-authorised to destroy the machine it lands on
@@ -141,6 +141,7 @@ func runInstaller(cfg *agent.EmbeddedConfig) int {
 	client := agent.NewClient(agent.ClientConfig{
 		Server: st.Server, StateFile: statePath, Label: cfg.Label,
 		CAPEM:              cfg.CAPEM,
+		SigningKey:         cfg.SigningKey,
 		AllowRemoteContain: st.AllowRemoteContain,
 		Base:               base,
 		Monitor:            true,
@@ -161,7 +162,7 @@ func runInstaller(cfg *agent.EmbeddedConfig) int {
 func runManagedOnce(st *agent.ClientState, base agent.Config, cfg *agent.EmbeddedConfig) int {
 	client := agent.NewClient(agent.ClientConfig{
 		Server: st.Server, StateFile: agent.DefaultStateFile(base.Home),
-		Label: cfg.Label, CAPEM: cfg.CAPEM, Base: base,
+		Label: cfg.Label, CAPEM: cfg.CAPEM, SigningKey: cfg.SigningKey, Base: base,
 	}, st)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)

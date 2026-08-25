@@ -35,6 +35,10 @@ func run() int {
 		switch os.Args[1] {
 		case "serve":
 			return runServe(os.Args[2:])
+		case "gensignkey":
+			return runGenSignKey(os.Args[2:])
+		case "sign-release":
+			return runSignRelease(os.Args[2:])
 		case "gencert":
 			return runGencert(os.Args[2:])
 		case "healthcheck":

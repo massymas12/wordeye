@@ -465,11 +465,26 @@ async function viewFleet(estateID) {
   // Only non-destructive work is offered across a selection. Containment stays
   // per-host behind its own approval: "run this on everything" is exactly the
   // wrong shape for an action that deletes things.
+  // Version drift. With agents installed at different times an estate quietly
+  // accumulates builds, and the console is the only place that can see it.
+  const versions = {};
+  for (const a of agents) versions[a.version || 'unknown'] = (versions[a.version || 'unknown'] || 0) + 1;
+  const newest = Object.keys(versions).sort().pop();
+  const behind = agents.filter((a) => (a.version || 'unknown') !== newest).length;
+
   const bulkBar = el('div', { class: 'filters', style: 'align-items:center' },
     selectAll, selCount,
     el('button', { class: 'ghost', onclick: () => runBulk('scan') }, 'Run scan'),
     el('button', { class: 'ghost', onclick: () => runBulk('baseline') }, 'Re-baseline'),
     el('button', { class: 'ghost', onclick: () => runBulk('verify') }, 'Verify'),
+    el('button', { class: 'danger',
+      title: 'Ask the selected hosts to install the current release. Each agent verifies the '
+           + 'signature against the key pinned at install before it will run anything, and the '
+           + 'dispatch needs a second approver.',
+      onclick: () => runBulk('upgrade') }, 'Upgrade agents'),
+    el('span', { class: behind ? 'badge sev-medium' : 'dim tiny',
+      text: behind ? behind + ' of ' + agents.length + ' behind ' + newest
+                   : 'all on ' + (newest || 'n/a') }),
     el('a', { href: '#/schedules', class: 'dim tiny', text: 'Schedules →' }));
 
   render(

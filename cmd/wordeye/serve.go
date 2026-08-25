@@ -14,6 +14,7 @@ import (
 	"syscall"
 
 	"wordeye/internal/console"
+	"wordeye/internal/sign"
 )
 
 // runServe starts the management console.
@@ -29,6 +30,7 @@ func runServe(args []string) int {
 		issuer      = fs.String("issuer", "WordEye", "issuer name shown in authenticator apps")
 		publicURL   = fs.String("public-url", "", "address agents should report to, e.g. https://console.example.com:8444 (required to generate installers)")
 		agentBins   = fs.String("agent-binaries", "", "directory of release binaries named wordeye-agent-<os>-<arch>, stamped to produce estate installers")
+		signKey     = fs.String("signing-key", "", "PUBLIC release-signing key stamped into installers so agents can verify upgrades (never the private half)")
 		adminUser   = fs.String("admin-user", "admin", "username created on first run")
 		insecure    = fs.Bool("insecure-allow-plaintext-ingest", false,
 			"permit a non-loopback ingest listener without TLS (only when TLS terminates at a proxy)")
@@ -97,6 +99,27 @@ FLAGS
 		return code
 	}
 
+	// Refuse a PRIVATE signing key here, loudly.
+	//
+	// The two strings differ by a prefix, and pasting the wrong one would put
+	// the key that authorises code execution across the estate onto the
+	// internet-facing host — silently, because everything would otherwise work.
+	// That is the single worst configuration mistake available in this system,
+	// so it is worth refusing to start over.
+	if strings.HasPrefix(strings.TrimSpace(*signKey), sign.PrivatePrefix) {
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(os.Stderr, "--signing-key was given a PRIVATE key.")
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(os.Stderr, "Only the public half belongs on a console. Anything holding the private")
+		fmt.Fprintln(os.Stderr, "key can make every agent in the estate run arbitrary code, and this host")
+		fmt.Fprintln(os.Stderr, "faces the internet.")
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(os.Stderr, "Run `wordeye gensignkey` on your build machine and pass the wordeye-pub-v1")
+		fmt.Fprintln(os.Stderr, "value here, keeping the wordeye-priv-v1 value off this server entirely.")
+		fmt.Fprintln(os.Stderr)
+		return 2
+	}
+
 	logger := log.New(os.Stderr, "", log.LstdFlags)
 	srv, err := console.New(console.Config{
 		DBPath:                       *dbPath,
@@ -108,6 +131,7 @@ FLAGS
 		Issuer:                       *issuer,
 		PublicURL:                    *publicURL,
 		AgentBinaryDir:               *agentBins,
+		ReleaseSigningPublicKey:      *signKey,
 		InsecureAllowPlaintextIngest: *insecure,
 		Logger:                       logger,
 		Forward: console.ForwardConfig{
