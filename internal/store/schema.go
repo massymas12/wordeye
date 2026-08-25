@@ -291,6 +291,51 @@ CREATE TABLE IF NOT EXISTS settings (
     value TEXT NOT NULL
 );
 
+-- ---------------------------------------------------------------------------
+-- Outbound webhooks, for raising tickets.
+--
+-- Console-side rather than agent-side, and deduplicated by ARTEFACT rather than
+-- by finding. A digest seen on six hosts is one incident and should be one
+-- ticket naming six hosts; six tickets is how an estate of 438 findings buries
+-- the four that matter. The agent-side webhook sink still exists for shipping
+-- raw events to a SIEM, which is a different job.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS webhooks (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    name         TEXT NOT NULL DEFAULT '',
+    url          TEXT NOT NULL,
+    -- Shared secret used to HMAC each delivery, so the receiver can prove the
+    -- payload came from this console and was not replayed or altered.
+    secret       TEXT NOT NULL DEFAULT '',
+    estate_id    INTEGER REFERENCES estates(id) ON DELETE CASCADE,
+    min_severity TEXT NOT NULL DEFAULT 'high',
+    enabled      INTEGER NOT NULL DEFAULT 1,
+    created_at   INTEGER NOT NULL,
+    created_by   TEXT NOT NULL DEFAULT '',
+    last_ok      INTEGER NOT NULL DEFAULT 0,
+    last_error   TEXT NOT NULL DEFAULT '',
+    fail_count   INTEGER NOT NULL DEFAULT 0
+);
+
+-- One row per (webhook, artefact) that has been delivered.
+--
+-- This is what stops a ticket being raised again every time an agent re-reports
+-- a shell that is still on disk — which, on a monitoring fleet, is every few
+-- minutes. Idempotency is the difference between a useful integration and a
+-- ticket queue nobody can read.
+CREATE TABLE IF NOT EXISTS webhook_deliveries (
+    webhook_id  INTEGER NOT NULL REFERENCES webhooks(id) ON DELETE CASCADE,
+    dedupe_key  TEXT NOT NULL,
+    first_sent  INTEGER NOT NULL,
+    last_sent   INTEGER NOT NULL,
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    delivered   INTEGER NOT NULL DEFAULT 0,
+    last_error  TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (webhook_id, dedupe_key)
+);
+CREATE INDEX IF NOT EXISTS webhook_deliveries_pending
+    ON webhook_deliveries(delivered, last_sent);
+
 CREATE TABLE IF NOT EXISTS audit (
     id     INTEGER PRIMARY KEY AUTOINCREMENT,
     at     INTEGER NOT NULL,

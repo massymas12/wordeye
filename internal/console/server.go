@@ -247,6 +247,8 @@ func (s *Server) Run(ctx context.Context) error {
 	// Silence is the only signal an uncatchable kill leaves, and only the
 	// server can see it.
 	s.startWatchdog(ctx)
+	// Outbound ticketing.
+	s.startWebhooks(ctx)
 
 	select {
 	case err := <-errc:

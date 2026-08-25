@@ -1,6 +1,10 @@
 package console
 
 import (
+	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net"
@@ -334,5 +338,74 @@ func TestSignedReleaseIsServedWithItsSignature(t *testing.T) {
 	}
 	if !sign.Verify(pub, got, served) {
 		t.Error("the served bytes do not verify against the signature served with them")
+	}
+}
+
+// A delivery must be verifiable by the receiver, or anyone who learns the URL
+// can raise tickets naming a client as compromised.
+func TestWebhookDeliveryIsSigned(t *testing.T) {
+	var gotSig, gotDelivery string
+	var body []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotSig = r.Header.Get("X-WordEye-Signature")
+		gotDelivery = r.Header.Get("X-WordEye-Delivery")
+		body, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	h := newHarness(t)
+	hook, err := h.srv.DB().CreateWebhook(store.Webhook{
+		Name: "tickets", URL: srv.URL, MinSeverity: "high",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	art := store.Artefact{
+		DedupeKey: "fs.heuristic_webshell|abc", RuleID: "fs.heuristic_webshell",
+		Severity: "critical", Title: "Web-shell structure detected",
+		Hosts: 6, Hostnames: []string{"a", "b"},
+	}
+	if err := h.srv.postWebhook(context.Background(), *hook, art); err != nil {
+		t.Fatalf("delivery failed: %v", err)
+	}
+
+	if gotDelivery != art.DedupeKey {
+		t.Errorf("idempotency header = %q, want %q", gotDelivery, art.DedupeKey)
+	}
+	mac := hmac.New(sha256.New, []byte(hook.Secret))
+	mac.Write(body)
+	want := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+	if gotSig != want {
+		t.Errorf("signature %q does not verify against the body", gotSig)
+	}
+}
+
+// A non-2xx response must be treated as a failure, so the artefact is retried
+// rather than marked delivered.
+func TestWebhookNonSuccessIsAFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	h := newHarness(t)
+	hook, _ := h.srv.DB().CreateWebhook(store.Webhook{Name: "t", URL: srv.URL})
+	err := h.srv.postWebhook(context.Background(), *hook, store.Artefact{DedupeKey: "k"})
+	if err == nil {
+		t.Error("a 503 was treated as a successful delivery")
+	}
+}
+
+// Webhook URLs frequently carry a token in the path or query; those must not
+// reach logs or error messages.
+func TestWebhookURLIsRedactedInErrors(t *testing.T) {
+	got := redactURL("https://hooks.example.com/services/T00/B11/SECRETTOKEN?key=abc123")
+	if strings.Contains(got, "SECRETTOKEN") || strings.Contains(got, "abc123") {
+		t.Errorf("redactURL leaked a credential: %s", got)
+	}
+	if !strings.Contains(got, "hooks.example.com") {
+		t.Errorf("redactURL hid the host, making the error useless: %s", got)
 	}
 }

@@ -49,6 +49,11 @@ func (s *Server) consoleHandler() http.Handler {
 	mux.HandleFunc("POST /api/schedules/{id}/enabled", s.write(s.handleScheduleEnabled))
 	mux.HandleFunc("POST /api/schedules/{id}/delete", s.write(s.handleDeleteSchedule))
 	mux.HandleFunc("POST /api/commands/bulk", s.write(s.handleBulkCommand))
+	mux.HandleFunc("GET /api/integrations", s.auth(s.handleIntegrations))
+	mux.HandleFunc("POST /api/webhooks", s.admin(s.handleCreateWebhook))
+	mux.HandleFunc("POST /api/webhooks/{id}/enabled", s.admin(s.handleWebhookEnabled))
+	mux.HandleFunc("POST /api/webhooks/{id}/delete", s.admin(s.handleDeleteWebhook))
+	mux.HandleFunc("POST /api/webhooks/{id}/test", s.admin(s.handleTestWebhook))
 	mux.HandleFunc("GET /api/correlations", s.auth(s.handleCorrelations))
 	mux.HandleFunc("GET /api/reports", s.auth(s.handleReports))
 

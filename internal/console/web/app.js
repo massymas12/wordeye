@@ -349,6 +349,7 @@ const views = {
   findings: viewFindings,
   correlations: viewCorrelations,
   schedules: viewSchedules,
+  integrations: viewIntegrations,
   commands: viewCommands,
   tokens: viewTokens,
   users: viewUsers,
@@ -1030,6 +1031,97 @@ async function viewSchedules() {
         + 'nothing that deletes or kills runs unattended.'),
       form,
       table(['Schedule', 'Time', 'Days', 'Scope', 'Stagger', 'Next / last run', 'State', ''], rows)));
+}
+
+
+// --- integrations ----------------------------------------------------------
+
+async function viewIntegrations() {
+  const [data, estates] = await Promise.all([
+    api.get('/api/integrations'),
+    api.get('/api/estates').catch(() => []),
+  ]);
+  const sys = data.syslog || {};
+  const hooks = data.webhooks || [];
+
+  // SIEM forwarding was configurable only on the command line and its counters
+  // were shown nowhere, so a forwarder silently discarding events since a
+  // collector restart looked exactly like a healthy one.
+  const syslogPanel = panel('SIEM forwarding',
+    el('div', { class: 'form' },
+      el('div', {},
+        el('div', { class: 'mono', text: sys.configured ? sys.target : 'not configured' }),
+        el('div', { class: 'dim tiny', text: sys.note || '' }))),
+    sys.configured
+      ? table(['Sent', 'Dropped', 'Errors'], [el('tr', {},
+          el('td', { class: 'num', text: String(sys.sent || 0) }),
+          el('td', { class: 'num' }, (sys.dropped || 0) > 0
+            ? el('span', { class: 'badge sev-high', text: String(sys.dropped) })
+            : el('span', { text: '0' })),
+          el('td', { class: 'num' }, (sys.errors || 0) > 0
+            ? el('span', { class: 'badge sev-medium', text: String(sys.errors) })
+            : el('span', { text: '0' })))])
+      : null);
+
+  const name = el('input', { placeholder: 'Ticket system', style: 'min-width:12rem' });
+  const url = el('input', { placeholder: 'https://example.com/hooks/wordeye', style: 'min-width:24rem' });
+  const sev = el('select', {},
+    ...['critical', 'high', 'medium', 'low'].map((x) =>
+      el('option', { value: x, text: x + ' and above' })));
+  sev.value = 'high';
+  const estate = el('select', {},
+    el('option', { value: '', text: 'every estate' }),
+    ...(estates || []).map((e) => el('option', { value: String(e.id), text: e.name })));
+
+  async function create() {
+    try {
+      const r = await api.post('/api/webhooks', {
+        name: name.value.trim(), url: url.value.trim(),
+        min_severity: sev.value, estate_id: estate.value ? Number(estate.value) : 0,
+      });
+      // Shown once. An operator who misses it cannot verify deliveries.
+      alert('Webhook created.' + String.fromCharCode(10) + String.fromCharCode(10)
+        + 'Signing secret (shown once):' + String.fromCharCode(10) + r.secret
+        + String.fromCharCode(10) + String.fromCharCode(10) + r.note);
+      route();
+    } catch (e) { toast(e.message, 'bad'); }
+  }
+
+  const rows = hooks.map((h) => el('tr', {},
+    el('td', {}, el('div', { text: h.name || '(unnamed)' }),
+      el('div', { class: 'dim tiny mono', text: h.url })),
+    el('td', { class: 'tiny', text: h.min_severity + ' and above' }),
+    el('td', { class: 'tiny', text: h.estate_id ? 'estate ' + h.estate_id : 'all estates' }),
+    el('td', { class: 'tiny' },
+      el('span', { class: h.fail_count ? 'st-offline' : (h.enabled ? 'st-online' : 'dim'),
+                   text: h.health || '' })),
+    el('td', {}, el('div', { class: 'actions' },
+      el('button', { class: 'ghost', onclick: async () => {
+        try { await api.post('/api/webhooks/' + h.id + '/test', {}); toast('Test delivered.', 'good'); route(); }
+        catch (e) { toast('Test failed: ' + e.message, 'bad'); }
+      } }, 'Send test'),
+      el('button', { class: 'ghost', onclick: async () => {
+        try { await api.post('/api/webhooks/' + h.id + '/enabled', { enabled: !h.enabled }); route(); }
+        catch (e) { toast(e.message, 'bad'); }
+      } }, h.enabled ? 'Pause' : 'Resume'),
+      el('button', { class: 'danger', onclick: async () => {
+        if (!confirm('Delete this webhook?')) return;
+        try { await api.post('/api/webhooks/' + h.id + '/delete', {}); toast('Deleted.', 'good'); route(); }
+        catch (e) { toast(e.message, 'bad'); }
+      } }, 'Delete')))));
+
+  render(
+    syslogPanel,
+    panel('Ticket webhooks',
+      el('p', { class: 'dim', style: 'padding:0 1rem' },
+        'One delivery per ARTEFACT, not per finding: a digest found on six hosts raises one ticket '
+        + 'naming six hosts. Each artefact is sent once and never again, because a monitoring fleet '
+        + 're-reports a file that is still on disk every few minutes. Deliveries carry an '
+        + 'X-WordEye-Signature header — an HMAC-SHA256 over the raw body — so the receiver can prove '
+        + 'the payload came from this console.'),
+      el('div', { class: 'form', style: 'flex-wrap:wrap;gap:.6rem;align-items:center' },
+        name, url, sev, estate, el('button', { onclick: create }, 'Add webhook')),
+      table(['Webhook', 'Threshold', 'Scope', 'Health', ''], rows)));
 }
 
 // --- commands --------------------------------------------------------------
